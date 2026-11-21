@@ -1,135 +1,76 @@
-/* Maximus TV v0.4 — Xtream Codes client with search. ES5 for older Samsung/LG TVs. */
+/* Maximus TV v0.6 — Xtream + M3U client, profiles, favourites, resume, settings. ES5 for older TVs.
+   Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
+  var VERSION = '0.6.0';
   var $ = function (id) { return document.getElementById(id); };
-  var LS = 'mtv_cfg';
-  var TTL = 12 * 3600 * 1000;
-  var PAGE = 120;
-  var cfg = null;          // {server, backup, user, pass, adult}
-  var data = { live: null, vod: null, series: null };
-  var cats = { live: null, vod: null, series: null };
-  var state = { tab: 'live', cat: null, shown: 0, items: [], sfilter: 'all', stack: [], f: { live: {}, vod: {}, series: {} } };
-  var DIMS = [['cn', 'Continent'], ['co', 'Country'], ['la', 'Language'], ['ty', 'Type']];
-  var hls = null;
+  var TTL = 12 * 3600 * 1000, PAGE = 120;
+  var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
+  var COLORS = ['#e11d2e', '#2563eb', '#16a34a', '#f59e0b', '#9333ea', '#0891b2', '#db2777', '#57534e'];
+  var LANG_OPTS = [['', 'Default'], ['sv', 'Swedish'], ['en', 'English'], ['pt', 'Portuguese'], ['es', 'Spanish'], ['de', 'German'], ['fr', 'French'], ['ar', 'Arabic'], ['it', 'Italian'], ['no', 'Norwegian'], ['da', 'Danish'], ['fi', 'Finnish'], ['off', 'Off (subtitles)']];
+  var LANG_NAMES = { sv: 'swe|swedish|svenska', en: 'eng|english', pt: 'por|portug', es: 'spa|spanish|español|espanol', de: 'ger|deu|german|deutsch', fr: 'fra|fre|french|français', ar: 'ara|arabic', it: 'ita|italian', no: 'nor|nob|norw', da: 'dan|danish|dansk', fi: 'fin|finnish|suomi' };
 
   /* ---------- storage ---------- */
-  function loadCfg() { try { return JSON.parse(localStorage.getItem(LS)); } catch (e) { return null; } }
-  function saveCfg() { try { localStorage.setItem(LS, JSON.stringify(cfg)); } catch (e) {} }
+  function lsGet(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function ssGet(k, d) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+  function ssSet(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  var DEFAULTS = { startTab: 'home', hideAdult: true, parentalPin: '', audioLang: '', subLang: '', format: 'm3u8', buffer: 30, epgOffset: 0, theme: 'dark', remember: true };
+  var settings = (function () { var s = lsGet('mtv_settings', {}), o = {}; for (var k in DEFAULTS) o[k] = s.hasOwnProperty(k) ? s[k] : DEFAULTS[k]; return o; })();
+  function saveSettings() { lsSet('mtv_settings', settings); }
+  // sources: persisted in localStorage when "remember" is on, otherwise sessionStorage only
+  function loadSources() { return settings.remember ? lsGet('mtv_sources', []) : ssGet('mtv_sources', []); }
+  function saveSources() {
+    if (settings.remember) { lsSet('mtv_sources', sources); try { sessionStorage.removeItem('mtv_sources'); } catch (e) {} }
+    else { ssSet('mtv_sources', sources); try { localStorage.removeItem('mtv_sources'); } catch (e) {} }
+  }
+  var sources = loadSources();
+  var activeId = lsGet('mtv_active', null);
+  var profiles = lsGet('mtv_profiles', []);
+  var profile = null, pdata = null;
+  var adultUnlocked = false;
+  function src() { for (var i = 0; i < sources.length; i++) if (sources[i].id === activeId) return sources[i]; return sources[0] || null; }
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function loadPdata(p) { var d = lsGet('mtv_pd_' + p.id, {}); d.fav = d.fav || {}; d.resume = d.resume || {}; d.recent = d.recent || []; return d; }
+  function savePdata() { if (profile) lsSet('mtv_pd_' + profile.id, pdata); }
+
   var idb = null;
   function db() {
     if (idb) return idb;
     idb = new Promise(function (res) {
       if (!window.indexedDB) return res(null);
-      var r = indexedDB.open('mtv', 1);
+      var r; try { r = indexedDB.open('mtv', 1); } catch (e) { return res(null); }
       r.onupgradeneeded = function () { r.result.createObjectStore('kv'); };
       r.onsuccess = function () { res(r.result); };
       r.onerror = function () { res(null); };
     });
     return idb;
   }
-  function cacheGet(k) {
+  function idbGet(k, ttl) {
     return db().then(function (d) {
       if (!d) return null;
       return new Promise(function (res) {
-        var q = d.transaction('kv').objectStore('kv').get(k);
-        q.onsuccess = function () { var v = q.result; res(v && Date.now() - v.t < TTL ? v.v : null); };
-        q.onerror = function () { res(null); };
+        try {
+          var q = d.transaction('kv').objectStore('kv').get(k);
+          q.onsuccess = function () { var v = q.result; res(v && (!ttl || Date.now() - v.t < ttl) ? v.v : null); };
+          q.onerror = function () { res(null); };
+        } catch (e) { res(null); }
       });
     });
   }
-  function cachePut(k, v) {
+  function idbPut(k, v) { return db().then(function (d) { if (d) try { d.transaction('kv', 'readwrite').objectStore('kv').put({ t: Date.now(), v: v }, k); } catch (e) {} }); }
+  function idbDel(k) { return db().then(function (d) { if (d) try { d.transaction('kv', 'readwrite').objectStore('kv').delete(k); } catch (e) {} }); }
+  function idbClearCatalogue() {
     return db().then(function (d) {
       if (!d) return;
-      try { d.transaction('kv', 'readwrite').objectStore('kv').put({ t: Date.now(), v: v }, k); } catch (e) {}
-    });
-  }
-  function cacheClear() {
-    return db().then(function (d) { if (d) try { d.transaction('kv', 'readwrite').objectStore('kv').clear(); } catch (e) {} });
-  }
-
-  /* ---------- API ---------- */
-  function trimUrl(s) { return (s || '').replace(/\s+/g, '').replace(/\/+$/, ''); }
-  function getJSON(url, timeout) {
-    return new Promise(function (res, rej) {
-      var x = new XMLHttpRequest();
-      x.open('GET', url, true);
-      x.timeout = timeout || 120000;
-      x.onload = function () {
-        if (x.status !== 200) return rej(new Error('HTTP ' + x.status));
-        try { res(JSON.parse(x.responseText)); } catch (e) { rej(new Error('Bad response')); }
-      };
-      x.onerror = function () { rej(new Error('Network error')); };
-      x.ontimeout = function () { rej(new Error('Timeout')); };
-      x.send();
-    });
-  }
-  function apiUrl(server, action, extra) {
-    return server + '/player_api.php?username=' + encodeURIComponent(cfg.user) +
-      '&password=' + encodeURIComponent(cfg.pass) + (action ? '&action=' + action : '') + (extra || '');
-  }
-  function api(action, extra, timeout) {
-    return getJSON(apiUrl(cfg.server, action, extra), timeout).catch(function (e) {
-      if (!cfg.backup || cfg.backup === cfg.server) throw e;
-      return getJSON(apiUrl(cfg.backup, action, extra), timeout).then(function (r) {
-        var t = cfg.server; cfg.server = cfg.backup; cfg.backup = t; saveCfg(); // switch to working server
-        return r;
+      return new Promise(function (res) {
+        try {
+          var st = d.transaction('kv', 'readwrite').objectStore('kv'), q = st.openCursor();
+          q.onsuccess = function () { var c = q.result; if (!c) return res(); if (String(c.key).indexOf('cat:') === 0) c.delete(); c.continue(); };
+          q.onerror = function () { res(); };
+        } catch (e) { res(); }
       });
     });
-  }
-  var ACT = { live: ['get_live_categories', 'get_live_streams'], vod: ['get_vod_categories', 'get_vod_streams'], series: ['get_series_categories', 'get_series'] };
-  function slim(type, a) {
-    var out = new Array(a.length);
-    for (var i = 0; i < a.length; i++) {
-      var s = a[i];
-      out[i] = {
-        id: type === 'series' ? s.series_id : s.stream_id,
-        n: s.name || '',
-        c: String(s.category_id),
-        p: s.stream_icon || s.cover || '',
-        x: s.container_extension || '',
-        r: s.rating || '',
-        a: s.is_adult == 1 ? 1 : 0,
-        g: type === 'series' ? (s.genre || '') : ''
-      };
-    }
-    return out;
-  }
-  function ensure(type) {
-    if (data[type]) return Promise.resolve();
-    var key = cfg.user + '@v2@' + type;
-    return cacheGet(key).then(function (hit) {
-      if (hit) { cats[type] = hit.cats; data[type] = hit.items; indexFor(type); return; }
-      return Promise.all([api(ACT[type][0]), api(ACT[type][1], '', 240000)]).then(function (r) {
-        cats[type] = (r[0] || []).map(function (c) { return { id: String(c.category_id), n: c.category_name || '' }; });
-        data[type] = slim(type, r[1] || []);
-        indexFor(type);
-        cachePut(key, { cats: cats[type], items: data[type] });
-      });
-    });
-  }
-  var ADULT_RE = /adult|xxx|18\+|porn/i;
-  var adultCats = { live: {}, vod: {}, series: {} };
-  function indexFor(type) {
-    var ac = adultCats[type] = {};
-    cats[type].forEach(function (c) { if (ADULT_RE.test(c.n)) ac[c.id] = 1; });
-    var K = window.MTVClassify, ctags = {};
-    cats[type].forEach(function (c) { var t = K.classifyCat(c.n, type); t.cn = K.continents(t.co); ctags[c.id] = t; });
-    var none = { co: [], la: [], ty: [], cn: [] };
-    var d = data[type];
-    for (var i = 0; i < d.length; i++) {
-      var it = d[i], ct = ctags[it.c] || none;
-      it.k = norm(it.n);
-      var x = K.classifyItem(it.n, type, ct, it.g);
-      if (x) { x.cn = K.continents(x.co); it.t = x; } else it.t = ct;
-    }
-  }
-  function visible(type, it) { return cfg.adult || (!it.a && !adultCats[type][it.c]); }
-
-  function streamUrl(type, id, ext) {
-    var u = encodeURIComponent(cfg.user), p = encodeURIComponent(cfg.pass);
-    if (type === 'live') return cfg.server + '/live/' + u + '/' + p + '/' + id + '.m3u8';
-    if (type === 'vod') return cfg.server + '/movie/' + u + '/' + p + '/' + id + '.' + (ext || 'mp4');
-    return cfg.server + '/series/' + u + '/' + p + '/' + id + '.' + (ext || 'mp4');
   }
 
   /* ---------- helpers ---------- */
@@ -138,63 +79,334 @@
     if (s.normalize) s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     return s.replace(/[^a-z0-9åäöæø+ ]+/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function el(tag, cls, html) { var e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
   function show(id, on) { $(id).classList[on ? 'remove' : 'add']('hidden'); }
+  function isShown(id) { return !$(id).classList.contains('hidden'); }
+  function each(list, fn) { Array.prototype.forEach.call(list, fn); }
+  function trimUrl(s) { s = (s || '').replace(/\s+/g, '').replace(/\/+$/, ''); if (s && !/^https?:\/\//i.test(s)) s = (location.protocol === 'https:' ? 'https://' : 'http://') + s; return s; }
+  function fmtTime(sec) { sec = Math.floor(sec || 0); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return (h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (s < 10 ? '0' : '') + s; }
+  function focusLater(e) { setTimeout(function () { if (e && e.focus) e.focus(); }, 40); }
+  function applyTheme() { document.body.className = 'theme-' + settings.theme; }
+  function adultHidden() { return (profile && profile.kids) || (settings.hideAdult && !adultUnlocked); }
 
-  /* ---------- login ---------- */
-  $('login-form').addEventListener('submit', function (e) {
+  /* ---------- modal (PIN / confirm) ---------- */
+  var modalCb = null;
+  function modal(opts) {
+    return new Promise(function (resolve) {
+      $('m-title').textContent = opts.title || ''; $('m-text').textContent = opts.text || ''; $('m-err').textContent = '';
+      var inp = $('m-input'); inp.value = ''; show('m-input', !!opts.pin);
+      $('m-ok').textContent = opts.ok || 'OK';
+      show('modal', true);
+      modalCb = function (ok) {
+        if (ok && opts.pin && opts.check && !opts.check(inp.value)) { $('m-err').textContent = 'Wrong PIN'; inp.value = ''; inp.focus(); return; }
+        if (ok && opts.pin && opts.minLen && inp.value.length < opts.minLen) { $('m-err').textContent = 'Use at least ' + opts.minLen + ' digits'; return; }
+        show('modal', false); modalCb = null; resolve(ok ? (opts.pin ? inp.value : true) : null);
+      };
+      focusLater(opts.pin ? inp : $('m-ok'));
+    });
+  }
+  $('m-ok').onclick = function () { if (modalCb) modalCb(true); };
+  $('m-cancel').onclick = function () { if (modalCb) modalCb(false); };
+  $('m-input').addEventListener('keydown', function (e) { if (e.keyCode === 13 && modalCb) { e.preventDefault(); modalCb(true); } });
+  function askPin(title, pin) { return modal({ title: title, text: 'Enter PIN', pin: true, check: function (v) { return v === pin; } }); }
+
+  /* ---------- network ---------- */
+  function getText(url, timeout) {
+    return new Promise(function (res, rej) {
+      var x = new XMLHttpRequest();
+      x.open('GET', url, true); x.timeout = timeout || 120000;
+      x.onload = function () { if (x.status >= 200 && x.status < 300) res(x.responseText); else rej(new Error('HTTP ' + x.status)); };
+      x.onerror = function () { rej(new Error('Network error (check the address; an https page cannot load http links)')); };
+      x.ontimeout = function () { rej(new Error('Timeout')); };
+      x.send();
+    });
+  }
+  function getJSON(url, timeout) { return getText(url, timeout).then(function (t) { try { return JSON.parse(t); } catch (e) { throw new Error('Bad response'); } }); }
+  function apiUrl(s, server, action, extra) {
+    return server + '/player_api.php?username=' + encodeURIComponent(s.user) + '&password=' + encodeURIComponent(s.pass) + (action ? '&action=' + action : '') + (extra || '');
+  }
+  function api(action, extra, timeout, s) {
+    s = s || src();
+    return getJSON(apiUrl(s, s.server, action, extra), timeout).catch(function (e) {
+      if (!s.backup || s.backup === s.server) throw e;
+      return getJSON(apiUrl(s, s.backup, action, extra), timeout).then(function (r) { var t = s.server; s.server = s.backup; s.backup = t; saveSources(); return r; });
+    });
+  }
+
+  /* ---------- catalogue ---------- */
+  var data, cats, adultCats, seriesEps;
+  function resetData() { data = { live: null, vod: null, series: null }; cats = { live: null, vod: null, series: null }; adultCats = { live: {}, vod: {}, series: {} }; seriesEps = {}; m3uLoading = null; }
+  resetData();
+  var ACT = { live: ['get_live_categories', 'get_live_streams'], vod: ['get_vod_categories', 'get_vod_streams'], series: ['get_series_categories', 'get_series'] };
+  function slimX(type, a) {
+    var out = new Array(a.length);
+    for (var i = 0; i < a.length; i++) {
+      var s = a[i];
+      out[i] = { id: String(type === 'series' ? s.series_id : s.stream_id), n: s.name || '', c: String(s.category_id), p: s.stream_icon || s.cover || '', x: s.container_extension || '', r: s.rating || '', a: s.is_adult == 1 ? 1 : 0, g: type === 'series' ? (s.genre || '') : '' };
+    }
+    return out;
+  }
+  function ensure(type) {
+    var s = src(); if (!s) return Promise.reject(new Error('No IPTV source configured'));
+    if (data[type]) return Promise.resolve();
+    if (s.type !== 'xtream') return ensureM3U(s);
+    var key = 'cat:' + s.id + ':' + type;
+    return idbGet(key, TTL).then(function (hit) {
+      if (hit) { cats[type] = hit.cats; data[type] = hit.items; indexFor(type); return; }
+      return Promise.all([api(ACT[type][0]), api(ACT[type][1], '', 240000)]).then(function (r) {
+        cats[type] = (r[0] || []).map(function (c) { return { id: String(c.category_id), n: c.category_name || '' }; });
+        data[type] = slimX(type, r[1] || []);
+        indexFor(type);
+        idbPut(key, { cats: cats[type], items: data[type] });
+      });
+    });
+  }
+  /* M3U: parse #EXTINF lines; group-title = category; tvg-logo; tvg-name. Episodes grouped into series by "S01 E02". */
+  var m3uLoading = null;
+  function ensureM3U(s) {
+    if (m3uLoading) return m3uLoading;
+    var key = 'cat:' + s.id + ':m3u';
+    m3uLoading = idbGet(key, s.type === 'file' ? 0 : TTL).then(function (hit) {
+      if (hit) return hit;
+      var get = s.type === 'file' ? idbGet('file:' + s.id, 0).then(function (t) { if (!t) throw new Error('Playlist file not found on this device. Upload it again in Settings.'); return t; }) : getText(s.url, 300000);
+      return get.then(function (text) { var p = parseM3U(text); idbPut(key, p); return p; });
+    }).then(function (p) {
+      ['live', 'vod', 'series'].forEach(function (t) { cats[t] = p.cats[t]; data[t] = p.items[t]; indexFor(t); });
+      seriesEps = p.eps;
+    });
+    m3uLoading.catch(function () { m3uLoading = null; });
+    return m3uLoading;
+  }
+  function attr(line, name) { var m = line.match(new RegExp(name + '="([^"]*)"', 'i')); return m ? m[1] : ''; }
+  function parseM3U(text) {
+    var lines = text.split(/\r?\n/), cats = { live: [], vod: [], series: [] }, catIdx = { live: {}, vod: {}, series: {} };
+    var items = { live: [], vod: [], series: [] }, eps = {}, seriesIdx = {}, info = null, n = 0, run = null, runN = 0;
+    function catId(t, name) { name = name || 'Uncategorised'; if (!catIdx[t][name]) { catIdx[t][name] = t[0] + (cats[t].length + 1); cats[t].push({ id: catIdx[t][name], n: name }); } return catIdx[t][name]; }
+    for (var i = 0; i < lines.length; i++) {
+      var L = lines[i];
+      if (L.indexOf('#EXTINF') === 0) { info = L; continue; }
+      if (!L || L.charAt(0) === '#' || !info) continue;
+      var url = L.trim(), comma = info.lastIndexOf('",'), name = info.slice(info.indexOf(',', comma > 0 ? comma + 1 : info.indexOf(' ')) + 1).trim();
+      if (comma > 0) name = info.slice(comma + 2).trim();
+      var tn = attr(info, 'tvg-name') || name, logo = attr(info, 'tvg-logo'), grp = attr(info, 'group-title');
+      var type = /\/series\//i.test(url) ? 'series' : /\/movie\//i.test(url) || /\.(mp4|mkv|avi|mov)(\?|$)/i.test(url) ? 'vod' : 'live';
+      var ext = (url.match(/\.([a-z0-9]{2,4})(\?|$)/i) || [])[1] || '';
+      var adult = /adult|xxx|18\+/i.test(grp) ? 1 : 0;
+      n++;
+      if (type === 'series') {
+        var m = tn.match(/^(.*?)[\s._-]*S([0-9Oo]{1,2})[\s._-]*E(\d{1,3})/i), cid = catId('series', grp), sname, sk;
+        var m2 = !m && tn.match(/^(?:EP|E|Episode)\s*(\d{1,3})\b/i);
+        if (m) { sname = m[1].replace(/[\s-]+$/, '').trim() || grp; sk = cid + '|' + sname; run = null; }
+        else if (m2) {
+          if (!run || run.cid !== cid || +m2[1] <= run.last) { runN++; run = { cid: cid, key: cid + '|#run' + runN, name: (grp || 'Series') + ' · untitled ' + runN, last: 0 }; }
+          run.last = +m2[1]; sname = run.name; sk = run.key; m = [0, 0, 1, m2[1]];
+        } else { sname = tn; sk = cid + '|' + sname; run = null; }
+        if (!seriesIdx[sk]) { seriesIdx[sk] = 'm' + n; items.series.push({ id: 'm' + n, n: sname, c: cid, p: logo, x: '', r: '', a: adult, g: '' }); eps['m' + n] = []; }
+        eps[seriesIdx[sk]].push({ id: 'e' + n, s: m ? +String(m[2]).replace(/o/ig, '0') || 1 : 1, e: m ? +m[3] : eps[seriesIdx[sk]].length + 1, t: tn, u: url, x: ext });
+      } else {
+        items[type].push({ id: 'm' + n, n: tn, c: catId(type, grp), p: logo, x: ext, r: '', a: adult, g: '', u: url });
+      }
+      info = null;
+    }
+    if (!n) throw new Error('No channels found in this playlist');
+    return { cats: cats, items: items, eps: eps };
+  }
+  var ADULT_RE = /adult|xxx|18\+|porn/i;
+  function indexFor(type) {
+    var ac = adultCats[type] = {};
+    var K = window.MTVClassify, ctags = {};
+    cats[type].forEach(function (c) { if (ADULT_RE.test(c.n)) ac[c.id] = 1; var t = K.classifyCat(c.n, type); t.cn = K.continents(t.co); ctags[c.id] = t; });
+    var none = { co: [], la: [], ty: [], cn: [] }, d = data[type];
+    for (var i = 0; i < d.length; i++) {
+      var it = d[i], ct = ctags[it.c] || none;
+      it.k = norm(it.n);
+      var x = K.classifyItem(it.n, type, ct, it.g);
+      if (x) { x.cn = K.continents(x.co); it.t = x; } else it.t = ct;
+    }
+  }
+  function visible(type, it) { return !adultHidden() || (!it.a && !adultCats[type][it.c]); }
+
+  function streamUrl(type, it) {
+    if (it.u) return it.u;
+    var s = src(), u = encodeURIComponent(s.user), p = encodeURIComponent(s.pass);
+    if (type === 'live') return s.server + '/live/' + u + '/' + p + '/' + it.id + '.' + (settings.format === 'ts' ? 'ts' : 'm3u8');
+    if (type === 'vod') return s.server + '/movie/' + u + '/' + p + '/' + it.id + '.' + (it.x || 'mp4');
+    return s.server + '/series/' + u + '/' + p + '/' + it.id + '.' + (it.x || 'mp4');
+  }
+  function ikey(type, id) { return (src() ? src().id : '') + ':' + type + ':' + id; }
+
+  /* ---------- source form (Xtream / M3U link / file) ---------- */
+  var formKind = 'xtream', editingSrc = null;
+  $('src-kind').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setKind(b.getAttribute('data-k')); });
+  function setKind(k) {
+    formKind = k;
+    each($('src-kind').children, function (c) { c.classList.toggle('on', c.getAttribute('data-k') === k); });
+    each(document.querySelectorAll('#src-form [data-for]'), function (d) { d.classList.toggle('hidden', d.getAttribute('data-for') !== k); });
+    $('s-save').textContent = k === 'file' ? 'Upload & connect' : 'Connect';
+  }
+  function openSourceForm(existing) {
+    editingSrc = existing || null;
+    $('s-err').textContent = '';
+    $('s-remember').checked = settings.remember;
+    $('login-sub').textContent = existing ? 'Edit IPTV source' : sources.length ? 'Add another IPTV source' : 'Add your IPTV service to get started.';
+    $('s-name').value = existing ? existing.name || '' : '';
+    if (existing) {
+      setKind(existing.type);
+      if (existing.type === 'xtream') { $('s-server').value = existing.server; $('s-backup').value = existing.backup || ''; $('s-user').value = existing.user; $('s-pass').value = existing.pass; }
+      if (existing.type === 'm3u') { $('s-url').value = existing.url; $('s-epg').value = existing.epg || ''; }
+    } else { setKind('xtream'); $('s-user').value = ''; $('s-pass').value = ''; $('s-url').value = ''; $('s-epg').value = ''; }
+    show('s-cancel', sources.length > 0);
+    show('main', false); show('login', true);
+    focusLater(existing ? $('s-name') : $('s-user'));
+  }
+  $('s-cancel').onclick = function () { show('login', false); show('main', true); setTab('settings'); };
+  $('src-form').addEventListener('submit', function (e) {
     e.preventDefault();
-    var c = { server: trimUrl($('l-server').value), backup: trimUrl($('l-backup').value), user: $('l-user').value.trim(), pass: $('l-pass').value, adult: false };
-    if (!/^https?:\/\//.test(c.server)) c.server = (location.protocol === 'https:' ? 'https://' : 'http://') + c.server;
-    if (c.backup && !/^https?:\/\//.test(c.backup)) c.backup = 'http://' + c.backup;
-    $('l-err').textContent = 'Connecting…';
-    cfg = c;
-    api('', '', 20000).then(function (r) {
-      if (!r || !r.user_info || r.user_info.auth == 0) throw new Error('Wrong username or password');
-      saveCfg();
-      $('l-err').textContent = '';
-      start(r);
-    }).catch(function (err) { cfg = null; $('l-err').textContent = 'Could not connect: ' + err.message; });
+    var err = $('s-err'), s = { id: editingSrc ? editingSrc.id : uid(), name: $('s-name').value.trim(), type: formKind };
+    settings.remember = $('s-remember').checked; saveSettings();
+    var p;
+    if (formKind === 'm3u') {
+      var url = $('s-url').value.trim();
+      if (!/^https?:\/\//i.test(url)) { err.textContent = 'Enter a link starting with http:// or https://'; return; }
+      var m = url.match(/^(https?:\/\/[^\/]+)\/get\.php\?(.*)$/i);
+      var q = m ? m[2] : '', u = (q.match(/username=([^&]+)/) || [])[1], pw = (q.match(/password=([^&]+)/) || [])[1];
+      if (m && u && pw) { s.type = 'xtream'; s.server = m[1]; s.backup = ''; s.user = decodeURIComponent(u); s.pass = decodeURIComponent(pw); }
+      else { s.url = url; s.epg = $('s-epg').value.trim(); }
+    }
+    if (s.type === 'xtream') {
+      if (formKind === 'xtream') { s.server = trimUrl($('s-server').value); s.backup = trimUrl($('s-backup').value); s.user = $('s-user').value.trim(); s.pass = $('s-pass').value; }
+      if (!s.server || !s.user || !s.pass) { err.textContent = 'Server, username and password are required.'; return; }
+      err.textContent = 'Connecting…';
+      p = api('', '', 20000, s).then(function (r) { if (!r || !r.user_info || r.user_info.auth == 0) throw new Error('Wrong username or password'); s.name = s.name || 'Xtream · ' + s.user; });
+    } else if (s.type === 'm3u') {
+      err.textContent = 'Downloading playlist… (large lists can take a minute)';
+      p = getText(s.url, 300000).then(function (t) { var parsed = parseM3U(t); idbPut('cat:' + s.id + ':m3u', parsed); s.name = s.name || 'M3U · ' + s.url.replace(/^https?:\/\//, '').split('/')[0]; });
+    } else {
+      var f = $('s-file').files && $('s-file').files[0];
+      if (!f && editingSrc) p = Promise.resolve();
+      else if (!f) { err.textContent = 'Choose a playlist file first.'; return; }
+      else {
+        err.textContent = 'Reading file…';
+        p = new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = function () { rej(new Error('Could not read the file')); }; r.readAsText(f); })
+          .then(function (t) { var parsed = parseM3U(t); s.name = s.name || 'File · ' + f.name; return idbPut('file:' + s.id, t).then(function () { return idbPut('cat:' + s.id + ':m3u', parsed); }); });
+      }
+    }
+    p.then(function () {
+      if (editingSrc) { for (var i = 0; i < sources.length; i++) if (sources[i].id === s.id) sources[i] = s; } else sources.push(s);
+      saveSources(); activeId = s.id; lsSet('mtv_active', activeId);
+      err.textContent = ''; resetData();
+      show('login', false);
+      if (!profile) return showProfiles();
+      show('main', true); setTab(settings.startTab);
+    }).catch(function (x) { err.textContent = 'Could not connect: ' + x.message; });
   });
 
-  function start(info) {
-    show('login', false); show('main', true);
-    if (info) renderAcct(info); else api('', '', 20000).then(renderAcct).catch(function () {});
-    $('s-adult').checked = !!cfg.adult;
-    setTab('live');
+  /* ---------- profiles ---------- */
+  var managing = false, peEditing = null, peEmoji = EMOJI[0], peColor = COLORS[0];
+  function showProfiles() {
+    show('main', false); show('login', false);
+    if (!profiles.length) { profiles.push({ id: uid(), name: 'Me', emoji: '🙂', color: COLORS[0], pin: '', kids: false }); lsSet('mtv_profiles', profiles); }
+    renderProfiles(); show('profiles', true);
   }
-  function renderAcct(r) {
-    var u = r.user_info || {};
-    var exp = u.exp_date ? new Date(u.exp_date * 1000).toISOString().slice(0, 10) : '—';
-    $('acct').innerHTML = 'User <b>' + esc(cfg.user) + '</b> · ' + esc(u.status || '') + ' · expires ' + exp +
-      ' · max connections ' + esc(u.max_connections || '?') + '<br>Server ' + esc(cfg.server);
+  function renderProfiles() {
+    var box = $('plist'); box.innerHTML = '';
+    profiles.forEach(function (p) {
+      var b = el('button', 'f pcard' + (managing ? ' edit' : ''), '<div class="pa" style="background:' + esc(p.color) + '">' + esc(p.emoji) + (p.pin ? '<span class="lock">🔒</span>' : '') + '</div><div class="pn">' + esc(p.name) + (p.kids ? ' · Kids' : '') + '</div>');
+      b.onclick = function () { managing ? editProfile(p) : pickProfile(p); };
+      box.appendChild(b);
+    });
+    if (profiles.length < 8) { var a = el('button', 'f pcard add', '<div class="pa">+</div><div class="pn">Add profile</div>'); a.onclick = function () { editProfile(null); }; box.appendChild(a); }
+    $('p-manage').textContent = managing ? 'Done' : 'Manage profiles';
+    focusLater(box.firstChild);
   }
+  $('p-manage').onclick = function () { managing = !managing; renderProfiles(); };
+  function pickProfile(p) {
+    var go = function () {
+      profile = p; pdata = loadPdata(p); lsSet('mtv_last_profile', p.id); adultUnlocked = false;
+      show('profiles', false); renderWho();
+      if (!sources.length) return openSourceForm(null);
+      show('main', true); setTab(settings.startTab);
+    };
+    if (p.pin) askPin('Profile PIN for ' + p.name, p.pin).then(function (ok) { if (ok) go(); }); else go();
+  }
+  function renderWho() { var w = $('who'); w.style.background = profile.color; w.textContent = profile.emoji; w.title = profile.name + ' — switch profile'; }
+  $('who').onclick = function () { managing = false; showProfiles(); };
+  function editProfile(p) {
+    peEditing = p; peEmoji = p ? p.emoji : EMOJI[profiles.length % EMOJI.length]; peColor = p ? p.color : COLORS[profiles.length % COLORS.length];
+    $('pe-title').textContent = p ? 'Edit profile' : 'New profile';
+    $('pe-name').value = p ? p.name : ''; $('pe-pin').value = p ? p.pin : ''; $('pe-kids').checked = !!(p && p.kids);
+    show('pe-del', !!p && profiles.length > 1);
+    var eb = $('pe-emoji'); eb.innerHTML = '';
+    EMOJI.forEach(function (e) { var b = el('button', 'f chip emo' + (e === peEmoji ? ' on' : ''), e); b.onclick = function () { peEmoji = e; each(eb.children, function (c) { c.classList.toggle('on', c === b); }); }; eb.appendChild(b); });
+    var cb = $('pe-color'); cb.innerHTML = '';
+    COLORS.forEach(function (c) { var b = el('button', 'f swatch' + (c === peColor ? ' on' : '')); b.style.background = c; b.onclick = function () { peColor = c; each(cb.children, function (x) { x.classList.toggle('on', x === b); }); }; cb.appendChild(b); });
+    show('profedit', true); focusLater($('pe-name'));
+  }
+  $('pe-cancel').onclick = function () { show('profedit', false); };
+  $('pe-save').onclick = function () {
+    var name = $('pe-name').value.trim() || 'Profile', pin = $('pe-pin').value.trim();
+    if (pin && !/^\d{4}$/.test(pin)) { modal({ title: 'PIN must be 4 digits' }); return; }
+    if (peEditing) { peEditing.name = name; peEditing.emoji = peEmoji; peEditing.color = peColor; peEditing.pin = pin; peEditing.kids = $('pe-kids').checked; }
+    else profiles.push({ id: uid(), name: name, emoji: peEmoji, color: peColor, pin: pin, kids: $('pe-kids').checked });
+    lsSet('mtv_profiles', profiles); show('profedit', false);
+    if (profile && peEditing === profile) renderWho();
+    if (isShown('profiles')) renderProfiles(); else renderSettings();
+  };
+  $('pe-del').onclick = function () {
+    var p = peEditing;
+    modal({ title: 'Delete profile "' + p.name + '"?', text: 'Its favourites and watch history on this device are removed.', ok: 'Delete' }).then(function (ok) {
+      if (!ok) return;
+      profiles = profiles.filter(function (x) { return x !== p; }); lsSet('mtv_profiles', profiles);
+      try { localStorage.removeItem('mtv_pd_' + p.id); } catch (e) {}
+      show('profedit', false);
+      if (profile === p) { profile = null; showProfiles(); } else if (isShown('profiles')) renderProfiles(); else renderSettings();
+    });
+  };
 
-  /* ---------- tabs / browse ---------- */
+  /* ---------- tabs ---------- */
+  var state = { tab: 'home', cat: null, shown: 0, items: [], sfilter: 'all', f: { live: {}, vod: {}, series: {} } };
+  var DIMS = [['cn', 'Continent'], ['co', 'Country'], ['la', 'Language'], ['ty', 'Type']];
   $('tabs').addEventListener('click', function (e) { var b = e.target.closest('.tab'); if (b) setTab(b.getAttribute('data-tab')); });
   function setTab(t) {
     state.tab = t;
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) { b.classList.toggle('on', b.getAttribute('data-tab') === t); });
-    show('browse', t === 'live' || t === 'vod' || t === 'series');
-    show('search', t === 'search');
-    show('settings', t === 'settings');
-    if (t === 'search') { setTimeout(function () { $('q').focus(); }, 50); preloadAll(); return; }
-    if (t === 'settings') return;
+    each(document.querySelectorAll('.tab'), function (b) { b.classList.toggle('on', b.getAttribute('data-tab') === t); });
+    show('home', t === 'home'); show('browse', t === 'live' || t === 'vod' || t === 'series'); show('search', t === 'search'); show('settings', t === 'settings');
+    if (t === 'home') return renderHome();
+    if (t === 'search') { focusLater($('q')); preloadAll(); return; }
+    if (t === 'settings') return renderSettings();
     $('cats').innerHTML = ''; $('grid').innerHTML = ''; $('fbar').innerHTML = '';
     $('status').textContent = 'Loading… (first time can take up to a minute)';
-    ensure(t).then(function () { if (state.tab === t) renderCats(t); })
-      .catch(function (e) { $('status').textContent = 'Could not load: ' + e.message; });
+    ensure(t).then(function () { if (state.tab === t) renderCats(t); }).catch(function (e) { $('status').textContent = 'Could not load: ' + e.message; });
   }
-  /* ---------- filters (continent / country / language / type) ---------- */
+
+  /* ---------- home: continue watching, favourites, recent channels ---------- */
+  function renderHome() {
+    var box = $('home-rows'); box.innerHTML = '';
+    var sid = src() ? src().id : '';
+    var cont = Object.keys(pdata.resume).map(function (k) { return pdata.resume[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; }).slice(0, 20);
+    var favs = Object.keys(pdata.fav).map(function (k) { return pdata.fav[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; });
+    var rec = pdata.recent.filter(function (r) { return r.src === sid; }).slice(0, 20);
+    box.appendChild(el('h2', '', 'Hi ' + esc(profile.name) + ' ' + esc(profile.emoji)));
+    function shelf(title, list, mk) { if (!list.length) return; box.appendChild(el('h3', '', title)); var s = el('div', 'shelf'); list.forEach(function (r) { s.appendChild(mk(r)); }); box.appendChild(s); }
+    shelf('Continue watching', cont, function (r) {
+      var c = card(r.type, r.item, r.label);
+      var bar = el('div', 'bar', '<i style="width:' + Math.min(100, Math.round(100 * r.t / (r.d || 1))) + '%"></i>'); bar.style.top = c.querySelector('.img') ? '' : '0';
+      c.insertBefore(bar, c.children[1]);
+      c.onclick = function () { r.ep ? playEpisode(r.item, r.ep) : play(r.type, r.item); };
+      return c;
+    });
+    shelf('Recently watched channels', rec, function (r) { return card('live', r.item); });
+    shelf('My favourites', favs, function (r) { return card(r.type, r.item); });
+    if (!cont.length && !favs.length && !rec.length) box.appendChild(el('p', 'note', 'Nothing here yet. Watch a channel, movie or episode, or tap ☆ in the player to add favourites. They will show up here for this profile.'));
+    focusLater(box.querySelector('.item') || $('tabs').querySelector('.on'));
+  }
+
+  /* ---------- filters ---------- */
   function active(t) { var f = state.f[t], n = 0; for (var k in f) if (f[k]) n++; return n; }
   function matchF(t, it, skip) {
     var f = state.f[t], tg = it.t;
-    for (var i = 0; i < DIMS.length; i++) {
-      var d = DIMS[i][0];
-      if (d === skip || !f[d]) continue;
-      if (!tg || tg[d].indexOf(f[d]) < 0) return false;
-    }
+    for (var i = 0; i < DIMS.length; i++) { var d = DIMS[i][0]; if (d === skip || !f[d]) continue; if (!tg || tg[d].indexOf(f[d]) < 0) return false; }
     return true;
   }
   function label(d, v) { return d === 'co' ? (window.MTVClassify.COUNTRIES[v] || [v])[0] : v; }
@@ -203,39 +415,27 @@
     DIMS.forEach(function (D) {
       var v = state.f[t][D[0]];
       var b = el('button', 'f fbtn' + (v ? ' on' : ''), esc(D[1]) + ': <b>' + esc(v ? label(D[0], v) : 'Any') + '</b> ▾');
-      b.onclick = function () { openFacet(t, D[0], D[1]); };
-      bar.appendChild(b);
+      b.onclick = function () { openFacet(t, D[0], D[1]); }; bar.appendChild(b);
     });
     if (active(t)) { var c = el('button', 'f fbtn clear', '✕ Clear filters'); c.onclick = function () { state.f[t] = {}; renderCats(t); }; bar.appendChild(c); }
   }
   function openFacet(t, d, title) {
     var counts = {}, d0 = data[t];
-    for (var i = 0; i < d0.length; i++) {
-      var it = d0[i];
-      if (!visible(t, it) || !matchF(t, it, d)) continue;
-      var vals = it.t ? it.t[d] : [];
-      for (var j = 0; j < vals.length; j++) counts[vals[j]] = (counts[vals[j]] || 0) + 1;
-    }
-    var keys = Object.keys(counts).filter(function (k) { return cfg.adult || k !== 'Adult'; }).sort(function (a, b) { return counts[b] - counts[a]; });
+    for (var i = 0; i < d0.length; i++) { var it = d0[i]; if (!visible(t, it) || !matchF(t, it, d)) continue; var vals = it.t ? it.t[d] : []; for (var j = 0; j < vals.length; j++) counts[vals[j]] = (counts[vals[j]] || 0) + 1; }
+    var keys = Object.keys(counts).filter(function (k) { return !adultHidden() || k !== 'Adult'; }).sort(function (a, b) { return counts[b] - counts[a]; });
     $('f-title').textContent = title;
     var box = $('f-opts'); box.innerHTML = '';
     var cur = state.f[t][d];
     var any = el('button', 'f chip' + (!cur ? ' on' : ''), 'Any'); any.onclick = function () { pickFacet(t, d, null); }; box.appendChild(any);
-    keys.forEach(function (k) {
-      var b = el('button', 'f chip' + (cur === k ? ' on' : ''), esc(label(d, k)) + ' <span class="cnt">' + counts[k] + '</span>');
-      b.onclick = function () { pickFacet(t, d, k); };
-      box.appendChild(b);
-    });
+    keys.forEach(function (k) { var b = el('button', 'f chip' + (cur === k ? ' on' : ''), esc(label(d, k)) + ' <span class="cnt">' + counts[k] + '</span>'); b.onclick = function () { pickFacet(t, d, k); }; box.appendChild(b); });
     if (!keys.length) box.appendChild(el('div', 'status', 'No options with the current filters.'));
-    show('fpanel', true);
-    setTimeout(function () { (box.querySelector('.chip.on') || any).focus(); }, 30);
+    show('fpanel', true); focusLater(box.querySelector('.chip.on') || any);
   }
   function pickFacet(t, d, v) {
     state.f[t][d] = v;
     if (d === 'cn' && v && state.f[t].co) { var cc = window.MTVClassify.COUNTRIES[state.f[t].co]; if (!cc || cc[2] !== v) state.f[t].co = null; }
-    show('fpanel', false);
-    renderCats(t);
-    setTimeout(function () { var b = $('fbar').children[DIMS.map(function (x) { return x[0]; }).indexOf(d)]; if (b) b.focus(); }, 30);
+    show('fpanel', false); renderCats(t);
+    focusLater($('fbar').children[DIMS.map(function (x) { return x[0]; }).indexOf(d)]);
   }
   $('f-close').onclick = function () { show('fpanel', false); };
 
@@ -244,18 +444,19 @@
     var box = $('cats'); box.innerHTML = '';
     var filt = active(t), cnt = {};
     if (filt) data[t].forEach(function (it) { if (visible(t, it) && matchF(t, it)) cnt[it.c] = (cnt[it.c] || 0) + 1; });
-    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (cfg.adult || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }));
+    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (!adultHidden() || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }));
+    if (pdata && Object.keys(pdata.fav).some(function (k) { return pdata.fav[k].type === t && pdata.fav[k].src === src().id; })) list.splice(1, 0, { id: '★', n: '★ Favourites' });
     list.forEach(function (c) {
-      var b = el('button', 'f cat', esc(c.n) + (filt && c.id !== '*' ? ' <span class="cnt">' + cnt[c.id] + '</span>' : '')); b.setAttribute('data-id', c.id);
-      b.onclick = function () { pickCat(t, c.id); };
-      box.appendChild(b);
+      var b = el('button', 'f cat', esc(c.n) + (filt && cnt[c.id] ? ' <span class="cnt">' + cnt[c.id] + '</span>' : '')); b.setAttribute('data-id', c.id);
+      b.onclick = function () { pickCat(t, c.id); }; box.appendChild(b);
     });
-    pickCat(t, filt || list.length < 2 ? '*' : list[1].id);
+    var first = list.filter(function (c) { return c.id !== '*' && c.id !== '★'; })[0];
+    pickCat(t, filt || !first ? '*' : first.id);
   }
   function pickCat(t, id) {
     state.cat = id;
-    Array.prototype.forEach.call($('cats').children, function (b) { b.classList.toggle('on', b.getAttribute('data-id') === id); });
-    state.items = data[t].filter(function (it) { return (id === '*' || it.c === id) && visible(t, it) && matchF(t, it); });
+    each($('cats').children, function (b) { b.classList.toggle('on', b.getAttribute('data-id') === id); });
+    state.items = data[t].filter(function (it) { return (id === '*' || (id === '★' ? !!pdata.fav[ikey(t, it.id)] : it.c === id)) && visible(t, it) && matchF(t, it); });
     state.shown = 0; $('grid').innerHTML = '';
     $('status').textContent = state.items.length ? state.items.length + ' items' : 'Nothing here.';
     renderMore(t, $('grid'), state);
@@ -263,47 +464,33 @@
   }
   function renderMore(t, grid, st) {
     var old = grid.querySelector('.more'); if (old) old.parentNode.removeChild(old);
-    var end = Math.min(st.items.length, st.shown + PAGE);
-    var frag = document.createDocumentFragment();
-    for (var i = st.shown; i < end; i++) frag.appendChild(card(st.items[i].type || t, st.items[i]));
+    var end = Math.min(st.items.length, st.shown + PAGE), frag = document.createDocumentFragment();
+    for (var i = st.shown; i < end; i++) frag.appendChild(card(t, st.items[i]));
     st.shown = end; grid.appendChild(frag);
-    if (end < st.items.length) {
-      var m = el('button', 'f btn ghost more', 'Show more (' + (st.items.length - end) + ' left)');
-      m.onclick = function () { renderMore(t, grid, st); };
-      grid.appendChild(m);
-    }
+    if (end < st.items.length) { var m = el('button', 'f btn ghost more', 'Show more (' + (st.items.length - end) + ' left)'); m.onclick = function () { renderMore(t, grid, st); }; grid.appendChild(m); }
   }
-  function card(type, it) {
+  function card(type, it, sub) {
     var b = el('button', 'f item ' + type);
     var img = el('div', 'img', it.p ? '' : esc(type === 'live' ? 'LIVE' : 'NO IMAGE'));
-    if (it.p) img.style.backgroundImage = 'url("' + it.p.replace(/"/g, '%22') + '")';
+    if (it.p) img.style.backgroundImage = 'url("' + String(it.p).replace(/"/g, '%22') + '")';
     b.appendChild(img);
     b.appendChild(el('div', 't', esc(it.n)));
-    var meta = type === 'live' ? 'Live' : type === 'vod' ? 'Movie' : 'Series';
-    if (it.r && it.r !== '0') meta += ' · ★ ' + esc(String(it.r).slice(0, 3));
-    b.appendChild(el('div', 'm', meta));
-    b.onclick = function () { open(type, it); };
+    var meta = sub || (type === 'live' ? 'Live' : type === 'vod' ? 'Movie' : 'Series');
+    if (!sub && it.r && it.r !== '0') meta += ' · ★ ' + esc(String(it.r).slice(0, 3));
+    b.appendChild(el('div', 'm', esc(meta)));
+    if (pdata && pdata.fav[ikey(type, it.id)]) b.appendChild(el('span', 'favmark', '★'));
+    b.onclick = function () { type === 'series' ? openSeries(it) : play(type, it); };
     return b;
-  }
-  function open(type, it) {
-    if (type === 'series') return openSeries(it);
-    play(streamUrl(type, it.id, it.x), it.n);
   }
 
   /* ---------- search ---------- */
   function preloadAll() {
     $('sres').innerHTML = '<div class="status">Loading catalogue for search…</div>';
-    Promise.all([ensure('live'), ensure('vod'), ensure('series')]).then(runSearch)
-      .catch(function (e) { $('sres').innerHTML = '<div class="status">Could not load: ' + esc(e.message) + '</div>'; });
+    Promise.all([ensure('live'), ensure('vod'), ensure('series')]).then(runSearch).catch(function (e) { $('sres').innerHTML = '<div class="status">Could not load: ' + esc(e.message) + '</div>'; });
   }
   var sTimer = null;
   $('q').addEventListener('input', function () { clearTimeout(sTimer); sTimer = setTimeout(runSearch, 250); });
-  $('sfilter').addEventListener('click', function (e) {
-    var b = e.target.closest('.chip'); if (!b) return;
-    state.sfilter = b.getAttribute('data-f');
-    Array.prototype.forEach.call($('sfilter').children, function (c) { c.classList.toggle('on', c === b); });
-    runSearch();
-  });
+  $('sfilter').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (!b) return; state.sfilter = b.getAttribute('data-f'); each($('sfilter').children, function (c) { c.classList.toggle('on', c === b); }); runSearch(); });
   function searchType(type, terms, limit) {
     var d = data[type]; if (!d) return [];
     var starts = [], rest = [];
@@ -319,43 +506,59 @@
   function runSearch() {
     var q = norm($('q').value), box = $('sres');
     if (q.length < 2) { box.innerHTML = '<div class="status">Type at least 2 letters.</div>'; return; }
-    var terms = q.split(' ');
-    var groups = [['live', 'Live TV'], ['vod', 'Movies'], ['series', 'Series']];
-    var limit = state.sfilter === 'all' ? 30 : 300;
+    var terms = q.split(' '), limit = state.sfilter === 'all' ? 30 : 300, total = 0;
     box.innerHTML = '';
-    var total = 0;
-    groups.forEach(function (g) {
+    [['live', 'Live TV'], ['vod', 'Movies'], ['series', 'Series']].forEach(function (g) {
       if (state.sfilter !== 'all' && state.sfilter !== g[0]) return;
-      var r = searchType(g[0], terms, limit);
-      if (!r.length) return;
+      var r = searchType(g[0], terms, limit); if (!r.length) return;
       total += r.length;
       box.appendChild(el('h3', '', g[1] + ' (' + r.length + (r.length >= limit ? '+' : '') + ')'));
-      var grid = el('div', 'grid');
-      r.forEach(function (it) { grid.appendChild(card(g[0], it)); });
-      box.appendChild(grid);
+      var grid = el('div', 'grid'); r.forEach(function (it) { grid.appendChild(card(g[0], it)); }); box.appendChild(grid);
     });
     if (!total) box.innerHTML = '<div class="status">No results for “' + esc($('q').value) + '”.</div>';
   }
 
+  /* ---------- favourites ---------- */
+  function slimItem(it) { return { id: it.id, n: it.n, p: it.p, x: it.x, u: it.u, c: it.c }; }
+  function toggleFav(type, it) {
+    var k = ikey(type, it.id);
+    if (pdata.fav[k]) delete pdata.fav[k]; else pdata.fav[k] = { type: type, item: slimItem(it), src: src().id, ts: Date.now() };
+    savePdata(); return !!pdata.fav[k];
+  }
+  function favLabel(on) { return on ? '★ Favourite' : '☆ Favourite'; }
+
   /* ---------- series ---------- */
+  var curSeries = null;
   function openSeries(it) {
+    curSeries = it;
     show('detail', true);
     $('d-title').textContent = it.n; $('d-plot').textContent = 'Loading…';
-    $('d-img').src = it.p || ''; $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
-    setTimeout(function () { $('d-close').focus(); }, 30);
-    api('get_series_info', '&series_id=' + it.id).then(function (r) {
-      $('d-plot').textContent = (r.info && r.info.plot) || '';
-      var eps = r.episodes || {};
-      var seasons = Object.keys(eps).sort(function (a, b) { return a - b; });
+    $('d-img').src = it.p || 'logo.svg'; $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
+    $('d-fav').textContent = favLabel(!!pdata.fav[ikey('series', it.id)]);
+    focusLater($('d-close'));
+    var p = src().type === 'xtream' ? api('get_series_info', '&series_id=' + it.id).then(function (r) {
+      var eps = {}, e = r.episodes || {};
+      Object.keys(e).forEach(function (s) { eps[s] = e[s].map(function (x) { return { id: String(x.id), s: +s, e: +x.episode_num, t: x.title || '', x: x.container_extension }; }); });
+      return { plot: (r.info && r.info.plot) || '', eps: eps };
+    }) : Promise.resolve().then(function () {
+      var eps = {}; (seriesEps[it.id] || []).forEach(function (x) { (eps[x.s] = eps[x.s] || []).push(x); });
+      Object.keys(eps).forEach(function (s) { eps[s].sort(function (a, b) { return a.e - b.e; }); });
+      return { plot: '', eps: eps };
+    });
+    p.then(function (r) {
+      if (curSeries !== it) return;
+      $('d-plot').textContent = r.plot;
+      var seasons = Object.keys(r.eps).sort(function (a, b) { return a - b; });
       if (!seasons.length) { $('d-plot').textContent += ' (No episodes found.)'; return; }
       seasons.forEach(function (s, i) {
         var b = el('button', 'f chip', 'Season ' + esc(s));
         b.onclick = function () {
-          Array.prototype.forEach.call($('d-seasons').children, function (c) { c.classList.toggle('on', c === b); });
+          each($('d-seasons').children, function (c) { c.classList.toggle('on', c === b); });
           var box = $('d-eps'); box.innerHTML = '';
-          eps[s].forEach(function (ep) {
-            var e = el('button', 'f ep', 'E' + esc(ep.episode_num) + ' · ' + esc(ep.title || ''));
-            e.onclick = function () { play(streamUrl('series', ep.id, ep.container_extension), it.n + ' · S' + s + 'E' + ep.episode_num); };
+          r.eps[s].forEach(function (ep) {
+            var rs = pdata.resume[ikey('ep', ep.id)];
+            var e = el('button', 'f ep', '<span>E' + esc(ep.e) + ' · ' + esc(ep.t) + '</span>' + (rs ? '<span class="note">▶ ' + fmtTime(rs.t) + '</span>' : ''));
+            e.onclick = function () { playEpisode(slimItem(it), ep); };
             box.appendChild(e);
           });
         };
@@ -364,52 +567,190 @@
       });
     }).catch(function (e) { $('d-plot').textContent = 'Could not load: ' + e.message; });
   }
-  $('d-close').onclick = function () { show('detail', false); };
+  $('d-close').onclick = function () { show('detail', false); curSeries = null; };
+  $('d-fav').onclick = function () { if (curSeries) $('d-fav').textContent = favLabel(toggleFav('series', curSeries)); };
 
   /* ---------- player ---------- */
-  var video = $('video');
+  var video = $('video'), hls = null, now = null, lastSave = 0;
   function stop() {
     if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
     try { video.pause(); } catch (e) {}
     video.removeAttribute('src'); try { video.load(); } catch (e) {}
   }
-  function play(url, title) {
+  function playEpisode(series, ep) {
+    var it = { id: ep.id, n: series.n + ' · S' + ep.s + 'E' + ep.e, p: series.p, x: ep.x, u: ep.u };
+    play('series', it, { series: series, ep: ep });
+  }
+  function play(type, it, extra) {
     stop();
+    now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
     show('player', true);
-    $('p-title').textContent = title; $('p-msg').textContent = '';
-    var isHls = /\.m3u8(\?|$)/.test(url);
-    var native = video.canPlayType('application/vnd.apple.mpegurl');
+    $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
+    var favKey = extra ? ikey('series', extra.series.id) : ikey(type, it.id);
+    $('p-fav').textContent = pdata.fav[favKey] ? '★' : '☆';
+    show('p-restart', false);
+    if (type === 'live') { addRecent(it); loadEpg(it); }
+    var url = streamUrl(type === 'series' ? 'series' : type, it);
+    var isHls = /\.m3u8(\?|$)/i.test(url), native = video.canPlayType('application/vnd.apple.mpegurl');
+    var rs = type !== 'live' ? pdata.resume[now.key] : null;
+    var startAt = rs && rs.t > 20 && rs.t < (rs.d || 1e9) * 0.95 ? rs.t : 0;
     if (isHls && !native && window.Hls && Hls.isSupported()) {
-      hls = new Hls({ enableWorker: true });
+      hls = new Hls({ enableWorker: true, maxBufferLength: +settings.buffer || 30, startPosition: startAt || -1 });
       hls.loadSource(url); hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, function () { video.play().catch(function () {}); });
-      hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) $('p-msg').textContent = 'Stream failed (' + d.details + '). If another device is watching, stop it first (1 connection).'; });
+      hls.on(Hls.Events.MANIFEST_PARSED, function () { pickTracksHls(); video.play().catch(function () {}); });
+      hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) $('p-msg').textContent = 'Stream failed (' + d.details + '). If another device is watching, stop it first (1 connection on many plans).'; });
     } else {
       video.src = url;
+      if (startAt) video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); try { video.currentTime = startAt; } catch (e) {} });
       video.play().catch(function () {});
     }
-    setTimeout(function () { $('p-close').focus(); }, 30);
+    if (startAt) { show('p-restart', true); $('p-msg').textContent = 'Resumed from ' + fmtTime(startAt); }
+    focusLater($('p-close'));
   }
-  video.addEventListener('error', function () {
-    var ext = (video.currentSrc || '').split('.').pop();
-    $('p-msg').textContent = 'Cannot play this ' + (/mkv|avi/i.test(ext) ? ext.toUpperCase() + ' file on this device' : 'stream') + '. If another device is watching, stop it first (1 connection).';
+  function langMatch(code, s) { return code && LANG_NAMES[code] && new RegExp(LANG_NAMES[code], 'i').test(s || ''); }
+  function pickTracksHls() {
+    if (!hls) return;
+    try {
+      if (settings.audioLang) hls.audioTracks.forEach(function (t, i) { if (langMatch(settings.audioLang, (t.lang || '') + ' ' + (t.name || ''))) hls.audioTrack = i; });
+      if (settings.subLang === 'off') hls.subtitleTrack = -1;
+      else if (settings.subLang) hls.subtitleTracks.forEach(function (t, i) { if (langMatch(settings.subLang, (t.lang || '') + ' ' + (t.name || ''))) hls.subtitleTrack = i; });
+    } catch (e) {}
+  }
+  video.addEventListener('loadedmetadata', function () {
+    try {
+      var at = video.audioTracks; if (at && settings.audioLang) for (var i = 0; i < at.length; i++) if (langMatch(settings.audioLang, at[i].language + ' ' + at[i].label)) at[i].enabled = true;
+      var tt = video.textTracks; if (tt) for (var j = 0; j < tt.length; j++) tt[j].mode = settings.subLang && settings.subLang !== 'off' && langMatch(settings.subLang, tt[j].language + ' ' + tt[j].label) ? 'showing' : (settings.subLang === 'off' ? 'disabled' : tt[j].mode);
+    } catch (e) {}
   });
-  function closePlayer() { stop(); show('player', false); }
+  video.addEventListener('timeupdate', function () {
+    if (!now || now.type === 'live' || !video.duration || !isFinite(video.duration) || video.duration < 60) return;
+    if (Date.now() - lastSave < 5000) return;
+    lastSave = Date.now(); saveResume();
+  });
+  function saveResume() {
+    if (!now || now.type === 'live' || !video.duration || !isFinite(video.duration)) return;
+    var t = video.currentTime, d = video.duration;
+    if (t > d * 0.95) delete pdata.resume[now.key];
+    else if (t > 20) pdata.resume[now.key] = { type: now.type, item: slimItem(now.it), ep: now.extra ? now.extra.ep : null, label: now.extra ? 'S' + now.extra.ep.s + ' E' + now.extra.ep.e + ' · ' + fmtTime(t) : fmtTime(t) + ' / ' + fmtTime(d), t: t, d: d, src: src().id, ts: Date.now() };
+    if (now.extra) pdata.resume[now.key] && (pdata.resume[now.key].item = { id: now.extra.series.id, n: now.extra.series.n, p: now.extra.series.p });
+    savePdata();
+  }
+  video.addEventListener('ended', function () { if (now && now.type !== 'live') { delete pdata.resume[now.key]; savePdata(); } });
+  video.addEventListener('error', function () {
+    var ext = (video.currentSrc || '').split('?')[0].split('.').pop();
+    $('p-msg').textContent = 'Cannot play this ' + (/mkv|avi/i.test(ext) ? ext.toUpperCase() + ' file on this device' : /ts/i.test(ext) ? 'TS stream here — try format "HLS (m3u8)" in Settings' : 'stream') + '. If another device is watching, stop it first.';
+  });
+  function addRecent(it) {
+    var sid = src().id;
+    pdata.recent = pdata.recent.filter(function (r) { return !(r.src === sid && r.item.id === it.id); });
+    pdata.recent.unshift({ item: slimItem(it), src: sid, ts: Date.now() });
+    pdata.recent = pdata.recent.slice(0, 30); savePdata();
+  }
+  function loadEpg(it) {
+    if (src().type !== 'xtream') return;
+    api('get_short_epg', '&stream_id=' + it.id + '&limit=2', 15000).then(function (r) {
+      var l = (r && r.epg_listings) || [], off = (+settings.epgOffset || 0) * 3600;
+      function dec(s) { try { return decodeURIComponent(escape(atob(s))); } catch (e) { return s || ''; } }
+      function hm(ts) { var d = new Date((+ts + off) * 1000); return (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes(); }
+      if (!l.length || !now || now.it !== it) return;
+      $('p-epg').textContent = l.slice(0, 2).map(function (x, i) { return (i ? 'Next ' : 'Now ') + hm(x.start_timestamp) + ' ' + dec(x.title); }).join('  ·  ');
+    }).catch(function () {});
+  }
+  function closePlayer() { saveResume(); stop(); show('player', false); now = null; if (state.tab === 'home') renderHome(); }
   $('p-close').onclick = closePlayer;
+  $('p-restart').onclick = function () { try { video.currentTime = 0; } catch (e) {} show('p-restart', false); $('p-msg').textContent = ''; };
+  $('p-fav').onclick = function () {
+    if (!now) return;
+    var on = now.extra ? toggleFav('series', now.extra.series) : toggleFav(now.type, now.it);
+    $('p-fav').textContent = on ? '★' : '☆';
+  };
 
   /* ---------- settings ---------- */
-  $('s-adult').onchange = function () { cfg.adult = this.checked; saveCfg(); };
-  $('s-refresh').onclick = function () { data = { live: null, vod: null, series: null }; cacheClear().then(function () { setTab('live'); }); };
-  $('s-logout').onclick = function () { localStorage.removeItem(LS); cacheClear(); location.reload(); };
+  function sel(id, opts, val) { return '<select class="f" id="' + id + '">' + opts.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (String(o[0]) === String(val) ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select>'; }
+  function row(k, small, ctrl) { return '<div class="srow"><div class="k">' + k + (small ? '<small>' + small + '</small>' : '') + '</div><div>' + ctrl + '</div></div>'; }
+  function renderSettings() {
+    var s = src(), h = '';
+    h += '<div class="card"><h3>Profile</h3>' + row('<span class="avatar" style="display:inline-flex;background:' + esc(profile.color) + '">' + esc(profile.emoji) + '</span> ' + esc(profile.name), profile.kids ? 'Kids profile' : '', '<button class="f btn ghost small" id="st-editp">Edit</button> <button class="f btn ghost small" id="st-switch">Switch profile</button>') + '</div>';
+    h += '<div class="card"><h3>Configure IPTV</h3><div id="st-sources"></div><div class="btnrow"><button class="f btn small" id="st-add">+ Add source (Xtream, M3U link or file)</button></div></div>';
+    h += '<div class="card"><h3>General</h3>' +
+      row('Start on', '', sel('st-start', [['home', 'Home'], ['live', 'Live TV'], ['vod', 'Movies'], ['series', 'Series'], ['search', 'Search']], settings.startTab)) +
+      row('Theme', '', sel('st-theme', [['dark', 'Dark'], ['oled', 'OLED black'], ['grey', 'Graphite']], settings.theme)) + '</div>';
+    h += '<div class="card"><h3>Playback</h3>' +
+      row('Live stream format', 'HLS works on iPhone and most TVs; TS only on players that support it', sel('st-format', [['m3u8', 'HLS (m3u8)'], ['ts', 'MPEG-TS (ts)']], settings.format)) +
+      row('Buffer', 'More buffer = fewer stalls, slower start', sel('st-buffer', [[10, '10 s'], [30, '30 s'], [60, '60 s'], [120, '120 s']], settings.buffer)) +
+      row('Preferred audio language', 'Used when the stream has several', sel('st-audio', LANG_OPTS.filter(function (o) { return o[0] !== 'off'; }), settings.audioLang)) +
+      row('Preferred subtitles', '', sel('st-sub', LANG_OPTS, settings.subLang)) +
+      row('TV guide time offset', 'Shift programme times if they look wrong', sel('st-epg', [[-3, '−3 h'], [-2, '−2 h'], [-1, '−1 h'], [0, '0 h'], [1, '+1 h'], [2, '+2 h'], [3, '+3 h']], settings.epgOffset)) + '</div>';
+    h += '<div class="card"><h3>Parental controls</h3>' +
+      row('Hide adult content', settings.parentalPin ? 'PIN required to show' : 'Set a PIN to protect this', '<button class="f btn ghost small" id="st-adult">' + (settings.hideAdult ? (adultUnlocked ? 'Hidden · unlocked now' : 'On') : 'Off') + '</button>') +
+      row('Parental PIN', settings.parentalPin ? 'Set' : 'Not set', '<button class="f btn ghost small" id="st-pin">' + (settings.parentalPin ? 'Change PIN' : 'Set PIN') + '</button>') + '</div>';
+    h += '<div class="card"><h3>Data &amp; privacy</h3>' +
+      row('Remember login on this device', 'Off = forgotten when the app is closed', '<button class="f btn ghost small" id="st-remember">' + (settings.remember ? 'On' : 'Off') + '</button>') +
+      row('Refresh catalogue', 'Reload channels and movies from the provider', '<button class="f btn ghost small" id="st-refresh">Refresh now</button>') +
+      row('Sign out', 'Forgets all IPTV logins on this device (profiles stay)', '<button class="f btn danger small" id="st-signout">Sign out &amp; forget logins</button>') + '</div>';
+    h += '<div class="card"><h3>About</h3><p class="note">Maximus TV ' + VERSION + '. Profiles, favourites, watch history and logins are stored only on this device; nothing is sent anywhere except to your IPTV provider. Syncing between devices would need an online account service (possible later).</p></div>';
+    $('set-body').innerHTML = h;
+    var sb = $('st-sources');
+    sources.forEach(function (x) {
+      var d = el('div', 'src' + (s && x.id === s.id ? ' on' : ''), '<div><b>' + esc(x.name || x.type) + '</b>' + (s && x.id === s.id ? '<span class="badge">Active</span>' : '') + '<div class="note">' + esc(x.type === 'xtream' ? 'Xtream · ' + x.server + ' · ' + x.user : x.type === 'm3u' ? 'M3U link' : 'Uploaded file') + '</div></div>');
+      var br = el('div', 'btnrow');
+      if (!(s && x.id === s.id)) { var u = el('button', 'f btn small', 'Use'); u.onclick = function () { activeId = x.id; lsSet('mtv_active', activeId); resetData(); state.f = { live: {}, vod: {}, series: {} }; renderSettings(); }; br.appendChild(u); }
+      var e = el('button', 'f btn ghost small', 'Edit'); e.onclick = function () { openSourceForm(x); }; br.appendChild(e);
+      var r = el('button', 'f btn danger small', 'Remove'); r.onclick = function () {
+        modal({ title: 'Remove "' + (x.name || x.type) + '"?', text: 'The login is forgotten on this device.', ok: 'Remove' }).then(function (ok) {
+          if (!ok) return;
+          sources = sources.filter(function (y) { return y !== x; }); saveSources(); idbDel('file:' + x.id); idbDel('cat:' + x.id + ':m3u');
+          if (activeId === x.id) { activeId = sources[0] ? sources[0].id : null; lsSet('mtv_active', activeId); resetData(); }
+          if (!sources.length) openSourceForm(null); else renderSettings();
+        });
+      }; br.appendChild(r);
+      d.appendChild(br); sb.appendChild(d);
+    });
+    $('st-editp').onclick = function () { editProfile(profile); };
+    $('st-switch').onclick = function () { managing = false; showProfiles(); };
+    $('st-add').onclick = function () { openSourceForm(null); };
+    $('st-start').onchange = function () { settings.startTab = this.value; saveSettings(); };
+    $('st-theme').onchange = function () { settings.theme = this.value; saveSettings(); applyTheme(); };
+    $('st-format').onchange = function () { settings.format = this.value; saveSettings(); };
+    $('st-buffer').onchange = function () { settings.buffer = +this.value; saveSettings(); };
+    $('st-audio').onchange = function () { settings.audioLang = this.value; saveSettings(); };
+    $('st-sub').onchange = function () { settings.subLang = this.value; saveSettings(); };
+    $('st-epg').onchange = function () { settings.epgOffset = +this.value; saveSettings(); };
+    $('st-adult').onclick = function () {
+      if (settings.hideAdult && !adultUnlocked) {
+        if (!settings.parentalPin) return modal({ title: 'Set a parental PIN first', text: 'Adult content stays hidden until a PIN is set.' }).then(function () { setPin(); });
+        if (profile.kids) return modal({ title: 'Not available on a kids profile' });
+        askPin('Show adult content', settings.parentalPin).then(function (ok) { if (ok) { adultUnlocked = true; renderSettings(); } });
+      } else { adultUnlocked = false; settings.hideAdult = true; saveSettings(); renderSettings(); }
+    };
+    $('st-pin').onclick = setPin;
+    $('st-remember').onclick = function () { settings.remember = !settings.remember; saveSettings(); saveSources(); renderSettings(); };
+    $('st-refresh').onclick = function () { idbClearCatalogue().then(function () { resetData(); modal({ title: 'Catalogue cleared', text: 'Lists reload from your provider next time you open a tab.' }); }); };
+    $('st-signout').onclick = function () {
+      modal({ title: 'Sign out?', text: 'All IPTV logins and uploaded playlists are removed from this device. Profiles and favourites stay.', ok: 'Sign out' }).then(function (ok) {
+        if (!ok) return;
+        sources.forEach(function (x) { idbDel('file:' + x.id); });
+        sources = []; activeId = null; saveSources(); lsSet('mtv_active', null);
+        try { localStorage.removeItem('mtv_sources'); sessionStorage.removeItem('mtv_sources'); } catch (e) {}
+        idbClearCatalogue(); resetData(); openSourceForm(null);
+      });
+    };
+  }
+  function setPin() {
+    var go = function () {
+      modal({ title: 'New parental PIN', text: '4–8 digits', pin: true, minLen: 4 }).then(function (p) { if (p) { settings.parentalPin = p; saveSettings(); renderSettings(); } });
+    };
+    if (settings.parentalPin) askPin('Current parental PIN', settings.parentalPin).then(function (ok) { if (ok) go(); }); else go();
+  }
 
   /* ---------- TV remote: spatial navigation + back ---------- */
-  try {
-    if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ChannelUp', 'ChannelDown'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} });
-  } catch (e) {}
-  function focusables() {
-    var root = !$('player').classList.contains('hidden') ? $('player') : !$('fpanel').classList.contains('hidden') ? $('fpanel') : !$('detail').classList.contains('hidden') ? $('detail') : document;
-    return Array.prototype.filter.call(root.querySelectorAll('.f'), function (n) { return n.offsetParent !== null || n === video; });
+  try { if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ColorF0Red'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} }); } catch (e) {}
+  function topRoot() {
+    var ov = document.querySelectorAll('.overlay:not(.hidden)'), best = null, bz = -1;
+    each(ov, function (o) { var z = +getComputedStyle(o).zIndex || 0; if (z >= bz) { bz = z; best = o; } });
+    return best || (isShown('login') ? $('login') : $('main'));
   }
+  function focusables() { return Array.prototype.filter.call(topRoot().querySelectorAll('.f, select'), function (n) { return n.offsetParent !== null || n === video; }); }
   function move(dir) {
     var cur = document.activeElement, list = focusables();
     if (!cur || list.indexOf(cur) < 0) { if (list[0]) list[0].focus(); return; }
@@ -428,14 +769,17 @@
     if (best) { best.focus(); if (best.scrollIntoView) best.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
   }
   function back() {
-    if (!$('player').classList.contains('hidden')) return closePlayer(), true;
-    if (!$('fpanel').classList.contains('hidden')) return show('fpanel', false), true;
-    if (!$('detail').classList.contains('hidden')) return show('detail', false), true;
-    if (state.tab !== 'live' && cfg) return setTab('live'), true;
+    if (isShown('modal')) return modalCb && modalCb(false), true;
+    if (isShown('profedit')) return show('profedit', false), true;
+    if (isShown('player')) return closePlayer(), true;
+    if (isShown('fpanel')) return show('fpanel', false), true;
+    if (isShown('detail')) return show('detail', false), true;
+    if (isShown('login') && sources.length) return $('s-cancel').onclick(), true;
+    if (isShown('main') && state.tab !== settings.startTab) return setTab(settings.startTab), true;
     return false;
   }
   document.addEventListener('keydown', function (e) {
-    var k = e.keyCode, typing = document.activeElement && document.activeElement.tagName === 'INPUT' && document.activeElement.type !== 'checkbox';
+    var k = e.keyCode, ae = document.activeElement, typing = ae && ((ae.tagName === 'INPUT' && ae.type !== 'checkbox' && ae.type !== 'file') || ae.tagName === 'SELECT');
     if (k === 10009 || k === 461 || k === 27 || (k === 8 && !typing)) {
       if (back()) { e.preventDefault(); return; }
       if (k === 10009 && window.tizen) { try { tizen.application.getCurrentApplication().exit(); } catch (x) {} }
@@ -445,12 +789,15 @@
     var dir = { 37: 'L', 38: 'U', 39: 'R', 40: 'D' }[k];
     if (!dir) return;
     if (typing && (dir === 'L' || dir === 'R')) return;
-    if (document.activeElement === video && (dir === 'L' || dir === 'R')) { video.currentTime += dir === 'R' ? 30 : -10; e.preventDefault(); return; }
+    if (ae && ae.tagName === 'SELECT' && (dir === 'U' || dir === 'D') && ae.getAttribute('data-open') === '1') return;
+    if (ae === video && (dir === 'L' || dir === 'R')) { video.currentTime += dir === 'R' ? 30 : -10; e.preventDefault(); return; }
     e.preventDefault(); move(dir);
   });
 
   /* ---------- boot ---------- */
-  cfg = loadCfg();
-  if (cfg && cfg.user) start(null); else setTimeout(function () { $('l-user').focus(); }, 50);
+  applyTheme();
+  if (activeId && !src()) activeId = null;
+  if (!activeId && sources[0]) activeId = sources[0].id;
+  showProfiles();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(function () {});
 })();
