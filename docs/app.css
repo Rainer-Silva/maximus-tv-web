@@ -130,3 +130,22 @@ nav::-webkit-scrollbar{display:none}
 .rows h2{font-size:20px;margin-bottom:8px}
 @media (max-width:760px){.quick{grid-template-columns:repeat(2,1fr)}.rows{padding:12px 12px 40px}}
 @media (min-width:1600px){.qbtn{font-size:20px;padding:24px}.qbtn .qi{font-size:36px}}
+
+/* v0.6.2 Netflix-style Home */
+.rowhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:18px 0 8px}
+.rowhead h3{margin:0}
+.seeall{background:none;color:var(--accent);font-weight:600;font-size:14px;padding:6px 10px;border-radius:8px;white-space:nowrap}
+.more-card .img{display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--chip);color:var(--text);font-weight:700;font-size:16px;text-align:center}
+.more-card .img small{opacity:.7;font-weight:500}
+.hero{position:relative;overflow:hidden;border-radius:16px;min-height:260px;display:flex;align-items:flex-end;gap:18px;padding:22px;margin:4px 0 6px;background:#111}
+.hbg{position:absolute;top:-30px;left:-30px;right:-30px;bottom:-30px;background-size:cover;background-position:center;filter:blur(24px) brightness(.45);-webkit-filter:blur(24px) brightness(.45)}
+.hero:after{content:"";position:absolute;left:0;right:0;bottom:0;height:60%;background:linear-gradient(transparent,rgba(0,0,0,.75))}
+.hposter{position:relative;z-index:1;width:150px;height:225px;flex-shrink:0;border-radius:10px;background-size:cover;background-position:center;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+.htext{position:relative;z-index:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+.hkick{font-size:12px;letter-spacing:.18em;color:var(--accent);font-weight:700}
+.htitle{font-size:28px;font-weight:800;line-height:1.15}
+.hmeta{opacity:.8;font-size:14px}
+.hbtns{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.hplay{background:#fff;color:#000}
+@media (max-width:760px){.hero{min-height:0;padding:16px;gap:14px}.hposter{width:110px;height:165px}.htitle{font-size:20px}.hbtns .btn{padding:10px 14px;font-size:14px}}
+@media (min-width:1600px){.hero{min-height:420px;padding:36px}.hposter{width:220px;height:330px}.htitle{font-size:44px}.hmeta{font-size:20px}.seeall{font-size:20px}.rowhead h3{font-size:26px}}

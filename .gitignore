@@ -1,2 +1,5 @@
 shots/
-dist/tizen-stage/
+dist/
+*.wgt
+*.env
+node_modules/
