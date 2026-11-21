@@ -136,7 +136,7 @@
   $('login-form').addEventListener('submit', function (e) {
     e.preventDefault();
     var c = { server: trimUrl($('l-server').value), backup: trimUrl($('l-backup').value), user: $('l-user').value.trim(), pass: $('l-pass').value, adult: false };
-    if (!/^https?:\/\//.test(c.server)) c.server = 'http://' + c.server;
+    if (!/^https?:\/\//.test(c.server)) c.server = (location.protocol === 'https:' ? 'https://' : 'http://') + c.server;
     if (c.backup && !/^https?:\/\//.test(c.backup)) c.backup = 'http://' + c.backup;
     $('l-err').textContent = 'Connecting…';
     cfg = c;
