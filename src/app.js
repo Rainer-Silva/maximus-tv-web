@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.2';
+  var VERSION = '0.6.3';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -31,7 +31,11 @@
   var adultUnlocked = false;
   function src() { for (var i = 0; i < sources.length; i++) if (sources[i].id === activeId) return sources[i]; return sources[0] || null; }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-  function loadPdata(p) { var d = lsGet('mtv_pd_' + p.id, {}); d.fav = d.fav || {}; d.resume = d.resume || {}; d.recent = d.recent || []; return d; }
+  function loadPdata(p) {
+    var d = lsGet('mtv_pd_' + p.id, {}); d.fav = d.fav || {}; d.resume = d.resume || {}; d.recent = d.recent || [];
+    if (!d.later) { d.later = {}; Object.keys(d.fav).forEach(function (k) { var f = d.fav[k]; if (f.type !== 'live') { d.later[k] = f; delete d.fav[k]; } }); }
+    return d;
+  }
   function savePdata() { if (profile) lsSet('mtv_pd_' + profile.id, pdata); }
 
   var idb = null;
@@ -136,7 +140,7 @@
 
   /* ---------- catalogue ---------- */
   var data, cats, adultCats, seriesEps;
-  function resetData() { data = { live: null, vod: null, series: null }; cats = { live: null, vod: null, series: null }; adultCats = { live: {}, vod: {}, series: {} }; seriesEps = {}; m3uLoading = null; }
+  function resetData() { data = { live: null, vod: null, series: null }; cats = { live: null, vod: null, series: null }; adultCats = { live: {}, vod: {}, series: {} }; seriesEps = {}; dimOpts = {}; m3uLoading = null; }
   resetData();
   var ACT = { live: ['get_live_categories', 'get_live_streams'], vod: ['get_vod_categories', 'get_vod_streams'], series: ['get_series_categories', 'get_series'] };
   function slimX(type, a) {
@@ -366,7 +370,8 @@
   };
 
   /* ---------- tabs ---------- */
-  var state = { tab: 'home', cat: null, shown: 0, items: [], sfilter: 'all', f: { live: {}, vod: {}, series: {} } };
+  var state = { az: !!lsGet('mtv_sort_az', false), tab: 'home', cat: null, shown: 0, items: [], sfilter: 'all', f: { live: {}, vod: {}, series: {} } };
+  var dimOpts = {};
   var DIMS = [['cn', 'Continent'], ['co', 'Country'], ['la', 'Language'], ['ty', 'Type']];
   $('tabs').addEventListener('click', function (e) { var b = e.target.closest('.tab'); if (b) setTab(b.getAttribute('data-tab')); });
   function setTab(t) {
@@ -471,11 +476,12 @@
     var items = rowItems(r);
     var h = el('div', 'rowhead');
     h.appendChild(el('h3', '', esc(r.title)));
-    if (!r.noAll && items.length > ROW_N) { var sa = el('button', 'f seeall', 'See all ›'); sa.onclick = function () { seeAll(r); }; h.appendChild(sa); }
+    var allFn = r.allFn || function () { seeAll(r); };
+    if (r.allFn || (!r.noAll && items.length > ROW_N)) { var sa = el('button', 'f seeall', 'See all ›'); sa.onclick = allFn; h.appendChild(sa); }
     box.appendChild(h);
     var s = el('div', 'shelf');
     items.slice(0, ROW_N).forEach(function (it) { s.appendChild(r.mk ? r.mk(it) : card(r.t, it)); });
-    if (!r.noAll && items.length > ROW_N) { var m = el('button', 'f item more-card ' + r.t, '<div class="img">See all<br><small>' + items.length + '</small></div><div class="t">' + esc(r.title) + '</div>'); m.onclick = function () { seeAll(r); }; s.appendChild(m); }
+    if ((r.allFn || !r.noAll) && items.length > ROW_N) { var m = el('button', 'f item more-card ' + r.t, '<div class="img">See all<br><small>' + items.length + '</small></div><div class="t">' + esc(r.title) + '</div>'); m.onclick = allFn; s.appendChild(m); }
     box.appendChild(s);
   }
   function drawHero(box, it, r) {
@@ -492,6 +498,14 @@
     tx.appendChild(bt); h.appendChild(tx); box.appendChild(h);
     return pl;
   }
+  /* full list for personal rows (mixed types) */
+  function openAll(title, list, mk) {
+    $('a-title').textContent = title + ' (' + list.length + ')';
+    var g = $('a-grid'); g.innerHTML = '';
+    list.forEach(function (r) { g.appendChild(mk(r)); });
+    show('allview', true); $('allview').scrollTop = 0; focusLater(g.querySelector('.item') || $('a-close'));
+  }
+  $('a-close').onclick = function () { show('allview', false); if (state.tab === 'home') renderHome(); };
   var homeQueue = [], homeBox = null;
   function homeMore() {
     if (!homeBox || state.tab !== 'home') return;
@@ -505,18 +519,20 @@
     var cont = Object.keys(pdata.resume).map(function (k) { return pdata.resume[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; }).slice(0, 20);
     var favs = Object.keys(pdata.fav).map(function (k) { return pdata.fav[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; });
     var rec = pdata.recent.filter(function (r) { return r.src === sid; }).slice(0, 20);
+    var top = el('div', 'personal'); box.appendChild(top);
     var heroBox = el('div', ''); box.appendChild(heroBox);
-    var top = el('div', ''); box.appendChild(top);
-    function shelf(title, list, mk) { if (!list.length) return; drawRow(top, { title: title, list: list, mk: mk, noAll: true }); }
-    shelf('Continue watching for ' + profile.name, cont, function (r) {
+    function shelf(title, list, mk) { if (!list.length) return; drawRow(top, { title: title, list: list, mk: mk, allFn: function () { openAll(title, list, mk); } }); }
+    shelf('Continue watching', cont, function (r) {
       var c = card(r.type, r.item, r.label);
       var bar = el('div', 'bar', '<i style="width:' + Math.min(100, Math.round(100 * r.t / (r.d || 1))) + '%"></i>'); bar.style.top = c.querySelector('.img') ? '' : '0';
       c.insertBefore(bar, c.children[1]);
-      c.onclick = function () { r.ep ? playEpisode(r.item, r.ep) : play(r.type, r.item); };
+      tap(c, function () { r.ep ? playEpisode(r.item, r.ep) : play(r.type, r.item); });
       return c;
     });
-    shelf('My favourites', favs, function (r) { return card(r.type, r.item); });
-    shelf('Recently watched channels', rec, function (r) { return card('live', r.item); });
+    var later = Object.keys(pdata.later).map(function (k) { return pdata.later[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; });
+    shelf('Watch later', later, function (r) { return card(r.type, r.item); });
+    shelf('Favourite channels', favs.filter(function (r) { return r.type === 'live'; }), function (r) { return card('live', r.item); });
+    shelf('Recently watched', rec, function (r) { return card('live', r.item); });
     var disc = el('div', ''); box.appendChild(disc);
     if (!src()) { disc.innerHTML = '<p class="note">Add an IPTV source in Settings → Configure IPTV to fill Home.</p>'; return focusLater($('tabs').querySelector('.on')); }
     disc.innerHTML = '<div class="status">Loading movies, series and channels…</div>';
@@ -554,8 +570,14 @@
   function label(d, v) { return d === 'co' ? (window.MTVClassify.COUNTRIES[v] || [v])[0] : v; }
   function renderFbar(t) {
     var bar = $('fbar'); bar.innerHTML = '';
+    var dimN = {}; DIMS.forEach(function (D) {
+      var o = {}, n = 0, d = D[0], arr = data[t] || [];
+      for (var i = 0; i < arr.length && n < 2; i++) { var it = arr[i]; if (!it.t || !visible(t, it) || !matchF(t, it, d)) continue; var vs = it.t[d] || []; for (var j = 0; j < vs.length; j++) if (!o[vs[j]] && !(adultHidden() && vs[j] === 'Adult')) { o[vs[j]] = 1; n++; } }
+      dimN[d] = n;
+    });
     DIMS.forEach(function (D) {
       var v = state.f[t][D[0]];
+      if (!v && dimN[D[0]] < 2) return; // e.g. hide Continent when it has no real options
       var b = el('button', 'f fbtn' + (v ? ' on' : ''), esc(D[1]) + ': <b>' + esc(v ? label(D[0], v) : 'Any') + '</b> ▾');
       b.onclick = function () { openFacet(t, D[0], D[1]); }; bar.appendChild(b);
     });
@@ -564,12 +586,12 @@
   function openFacet(t, d, title) {
     var counts = {}, d0 = data[t];
     for (var i = 0; i < d0.length; i++) { var it = d0[i]; if (!visible(t, it) || !matchF(t, it, d)) continue; var vals = it.t ? it.t[d] : []; for (var j = 0; j < vals.length; j++) counts[vals[j]] = (counts[vals[j]] || 0) + 1; }
-    var keys = Object.keys(counts).filter(function (k) { return !adultHidden() || k !== 'Adult'; }).sort(function (a, b) { return counts[b] - counts[a]; });
+    var keys = Object.keys(counts).filter(function (k) { return !adultHidden() || k !== 'Adult'; }).sort(function (a, b) { return azCmp(label(d, a), label(d, b)); });
     $('f-title').textContent = title;
     var box = $('f-opts'); box.innerHTML = '';
     var cur = state.f[t][d];
-    var any = el('button', 'f chip' + (!cur ? ' on' : ''), 'Any'); any.onclick = function () { pickFacet(t, d, null); }; box.appendChild(any);
-    keys.forEach(function (k) { var b = el('button', 'f chip' + (cur === k ? ' on' : ''), esc(label(d, k)) + ' <span class="cnt">' + counts[k] + '</span>'); b.onclick = function () { pickFacet(t, d, k); }; box.appendChild(b); });
+    var any = el('button', 'f chip opt' + (!cur ? ' on' : ''), '<span>Any</span>'); any.onclick = function () { pickFacet(t, d, null); }; box.appendChild(any);
+    keys.forEach(function (k) { var b = el('button', 'f chip opt' + (cur === k ? ' on' : ''), '<span>' + esc(label(d, k)) + '</span><span class="cnt">' + counts[k] + '</span>'); b.onclick = function () { pickFacet(t, d, k); }; box.appendChild(b); });
     if (!keys.length) box.appendChild(el('div', 'status', 'No options with the current filters.'));
     show('fpanel', true); focusLater(box.querySelector('.chip.on') || any);
   }
@@ -579,6 +601,7 @@
     show('fpanel', false); renderCats(t);
     focusLater($('fbar').children[DIMS.map(function (x) { return x[0]; }).indexOf(d)]);
   }
+  $('sortbtn').onclick = function () { state.az = !state.az; lsSet('mtv_sort_az', state.az); if (state.cat) pickCat(state.tab, state.cat); focusLater($('sortbtn')); };
   $('f-close').onclick = function () { show('fpanel', false); };
 
   function renderCats(t) {
@@ -586,15 +609,16 @@
     var box = $('cats'); box.innerHTML = '';
     var filt = active(t), cnt = {};
     if (filt) data[t].forEach(function (it) { if (visible(t, it) && matchF(t, it)) cnt[it.c] = (cnt[it.c] || 0) + 1; });
-    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (!adultHidden() || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }));
+    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (!adultHidden() || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }).slice().sort(function (a, b) { return azCmp(a.n, b.n); }));
     var cu = state.custom && state.custom.t === t ? state.custom : null;
     if (cu) list.splice(1, 0, { id: '~', n: '◆ ' + cu.title });
-    if (pdata && Object.keys(pdata.fav).some(function (k) { return pdata.fav[k].type === t && pdata.fav[k].src === src().id; })) list.splice(1, 0, { id: '★', n: '★ Favourites' });
+    var store = t === 'live' ? pdata.fav : pdata.later;
+    if (pdata && Object.keys(store).some(function (k) { return store[k].type === t && store[k].src === src().id; })) list.splice(1, 0, { id: '★', n: t === 'live' ? '★ Favourite channels' : '✓ Watch later' });
     list.forEach(function (c) {
       var b = el('button', 'f cat', esc(c.n) + (filt && cnt[c.id] ? ' <span class="cnt">' + cnt[c.id] + '</span>' : '')); b.setAttribute('data-id', c.id);
       b.onclick = function () { pickCat(t, c.id); }; box.appendChild(b);
     });
-    var first = list.filter(function (c) { return c.id !== '*' && c.id !== '★'; })[0];
+    var first = cats[t].filter(function (c) { return (!adultHidden() || !adultCats[t][c.id]) && (!filt || cnt[c.id]); })[0]; // provider's own first category stays the default
     if (cu && cu.fresh) { cu.fresh = false; return pickCat(t, '~'); }
     pickCat(t, filt || !first ? '*' : first.id);
   }
@@ -602,8 +626,11 @@
     state.cat = id;
     each($('cats').children, function (b) { b.classList.toggle('on', b.getAttribute('data-id') === id); });
     var cu = id === '~' ? state.custom : null;
-    state.items = data[t].filter(function (it) { return (id === '*' || (cu ? cu.pred(it) : id === '★' ? !!pdata.fav[ikey(t, it.id)] : it.c === id)) && visible(t, it) && matchF(t, it); });
+    state.items = data[t].filter(function (it) { return (id === '*' || (cu ? cu.pred(it) : id === '★' ? !!(t === 'live' ? pdata.fav : pdata.later)[ikey(t, it.id)] : it.c === id)) && visible(t, it) && matchF(t, it); });
     if (cu && cu.sort) state.items.sort(cu.sort);
+    if (state.az) state.items.sort(function (a, b) { return azCmp(a.n, b.n); });
+    if (t === 'live' && !state.az && id !== '★') { var fv = [], rest = []; state.items.forEach(function (it) { (pdata.fav[ikey('live', it.id)] ? fv : rest).push(it); }); state.items = fv.concat(rest); }
+    $('sortbtn').textContent = state.az ? 'Sort: A–Z' : 'Sort: Default';
     state.shown = 0; $('grid').innerHTML = '';
     $('status').textContent = state.items.length ? state.items.length + ' items' : 'Nothing here.';
     renderMore(t, $('grid'), state);
@@ -625,8 +652,9 @@
     var meta = sub || (type === 'live' ? 'Live' : type === 'vod' ? 'Movie' : 'Series');
     if (!sub && it.r && it.r !== '0') meta += ' · ★ ' + esc(String(it.r).slice(0, 3));
     b.appendChild(el('div', 'm', esc(meta)));
-    if (pdata && pdata.fav[ikey(type, it.id)]) b.appendChild(el('span', 'favmark', '★'));
-    b.onclick = function () { type === 'series' ? openSeries(it) : play(type, it); };
+    if (pdata) markCard(b, type, it);
+    tap(b, function () { type === 'series' ? openSeries(it) : type === 'vod' ? openMovie(it) : play(type, it); });
+    longPress(b, type, it);
     return b;
   }
 
@@ -667,6 +695,42 @@
 
   /* ---------- favourites ---------- */
   function slimItem(it) { return { id: it.id, n: it.n, p: it.p, x: it.x, u: it.u, c: it.c }; }
+  function sortKey(x) { return String(x || '').replace(/^[^0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF]+/, ''); }
+  var collator = null; try { collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true }); } catch (e) {}
+  function azCmp(a, b) { a = sortKey(a); b = sortKey(b); if (collator) return collator.compare(a, b); a = a.toLowerCase(); b = b.toLowerCase(); return a < b ? -1 : a > b ? 1 : 0; }
+  function isLater(type, it) { return !!pdata.later[ikey(type, it.id)]; }
+  function toggleLater(type, it) {
+    var k = ikey(type, it.id);
+    if (pdata.later[k]) delete pdata.later[k]; else pdata.later[k] = { type: type, item: slimItem(it), src: src().id, ts: Date.now() };
+    savePdata(); return !!pdata.later[k];
+  }
+  function laterLabel(on) { return on ? '✓ Watch later' : '＋ Watch later'; }
+  var toastT = null;
+  function toast(msg) {
+    var t = $('toast'); if (!t) { t = el('div', ''); t.id = 'toast'; document.body.appendChild(t); }
+    t.textContent = msg; t.className = 'show'; clearTimeout(toastT); toastT = setTimeout(function () { t.className = ''; }, 1800);
+  }
+  // long-press / right-click / remote colour key: favourite a channel, or add a movie/series to My list
+  function quickToggle(type, it, b) {
+    var on;
+    if (type === 'live') { on = toggleFav('live', it); toast(on ? '★ Added to favourite channels' : 'Removed from favourite channels'); }
+    else { on = toggleLater(type, it); toast(on ? '✓ Added to Watch later' : 'Removed from Watch later'); }
+    if (b) markCard(b, type, it);
+  }
+  function markCard(b, type, it) {
+    var m = b.querySelector('.favmark'); if (m) b.removeChild(m);
+    var on = type === 'live' ? !!pdata.fav[ikey('live', it.id)] : isLater(type, it);
+    if (on) b.appendChild(el('span', 'favmark', type === 'live' ? '★' : '✓'));
+  }
+  function tap(b, fn) { b.onclick = function (e) { if (b._lp) { b._lp = false; return; } fn(e); }; }
+  function longPress(b, type, it) {
+    var tm = null;
+    b._mt = [type, it];
+    b.addEventListener('touchstart', function () { b._lp = false; clearTimeout(tm); tm = setTimeout(function () { b._lp = true; quickToggle(type, it, b); }, 550); }, { passive: true });
+    b.addEventListener('touchmove', function () { clearTimeout(tm); }, { passive: true });
+    b.addEventListener('touchend', function () { clearTimeout(tm); });
+    b.addEventListener('contextmenu', function (e) { e.preventDefault(); if (!b._lp) quickToggle(type, it, b); });
+  }
   function toggleFav(type, it) {
     var k = ikey(type, it.id);
     if (pdata.fav[k]) delete pdata.fav[k]; else pdata.fav[k] = { type: type, item: slimItem(it), src: src().id, ts: Date.now() };
@@ -681,7 +745,7 @@
     show('detail', true);
     $('d-title').textContent = it.n; $('d-plot').textContent = 'Loading…';
     $('d-img').src = it.p || 'logo.svg'; $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
-    $('d-fav').textContent = favLabel(!!pdata.fav[ikey('series', it.id)]);
+    $('d-fav').textContent = laterLabel(isLater('series', it)); curMovie = null; show('d-play', false); show('d-seasons', true); show('d-eps', true);
     focusLater($('d-close'));
     var p = src().type === 'xtream' ? api('get_series_info', '&series_id=' + it.id).then(function (r) {
       var eps = {}, e = r.episodes || {};
@@ -714,8 +778,30 @@
       });
     }).catch(function (e) { $('d-plot').textContent = 'Could not load: ' + e.message; });
   }
-  $('d-close').onclick = function () { show('detail', false); curSeries = null; };
-  $('d-fav').onclick = function () { if (curSeries) $('d-fav').textContent = favLabel(toggleFav('series', curSeries)); };
+  $('d-close').onclick = function () { show('detail', false); curSeries = null; curMovie = null; if (state.tab === 'home') renderHome(); };
+  $('d-fav').onclick = function () {
+    var t = curMovie ? 'vod' : 'series', it = curMovie || curSeries; if (!it) return;
+    $('d-fav').textContent = laterLabel(toggleLater(t, it));
+  };
+  /* ---------- movie detail (Play + My list) ---------- */
+  var curMovie = null;
+  function openMovie(it) {
+    curMovie = it; curSeries = null;
+    show('detail', true);
+    $('d-title').textContent = it.n; $('d-plot').textContent = num(it.r) ? '★ ' + String(it.r).slice(0, 3) : '';
+    $('d-img').src = it.p || 'logo.svg'; $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
+    show('d-seasons', false); show('d-eps', false); show('d-play', true);
+    var rs = pdata.resume[ikey('vod', it.id)];
+    $('d-play').textContent = rs && rs.t > 20 ? '▶ Resume ' + fmtTime(rs.t) : '▶ Play';
+    $('d-fav').textContent = laterLabel(isLater('vod', it));
+    focusLater($('d-play'));
+    if (src().type === 'xtream') api('get_vod_info', '&vod_id=' + it.id).then(function (r) {
+      if (curMovie !== it || !r || !r.info) return;
+      var i = r.info, meta = [i.releasedate ? String(i.releasedate).slice(0, 4) : '', i.genre || '', i.duration || ''].filter(Boolean).join(' · ');
+      $('d-plot').innerHTML = (meta ? '<b>' + esc(meta) + '</b><br>' : '') + esc(i.plot || i.description || '');
+    }).catch(function () {});
+  }
+  $('d-play').onclick = function () { if (curMovie) { var it = curMovie; show('detail', false); curMovie = null; play('vod', it); } };
 
   /* ---------- player ---------- */
   var video = $('video'), hls = null, now = null, lastSave = 0;
@@ -733,8 +819,7 @@
     now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
     show('player', true);
     $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
-    var favKey = extra ? ikey('series', extra.series.id) : ikey(type, it.id);
-    $('p-fav').textContent = pdata.fav[favKey] ? '★' : '☆';
+    $('p-fav').textContent = type === 'live' ? (pdata.fav[ikey('live', it.id)] ? '★ Favourite' : '☆ Favourite') : laterLabel(extra ? isLater('series', extra.series) : isLater(type, it));
     show('p-restart', false);
     if (type === 'live') { addRecent(it); loadEpg(it); }
     var url = streamUrl(type === 'series' ? 'series' : type, it);
@@ -808,8 +893,9 @@
   $('p-restart').onclick = function () { try { video.currentTime = 0; } catch (e) {} show('p-restart', false); $('p-msg').textContent = ''; };
   $('p-fav').onclick = function () {
     if (!now) return;
-    var on = now.extra ? toggleFav('series', now.extra.series) : toggleFav(now.type, now.it);
-    $('p-fav').textContent = on ? '★' : '☆';
+    if (now.type === 'live') { var f = toggleFav('live', now.it); $('p-fav').textContent = f ? '★ Favourite' : '☆ Favourite'; toast(f ? '★ Added to favourite channels' : 'Removed from favourite channels'); return; }
+    var on = now.extra ? toggleLater('series', now.extra.series) : toggleLater(now.type, now.it);
+    $('p-fav').textContent = laterLabel(on); toast(on ? '✓ Added to Watch later' : 'Removed from Watch later');
   };
 
   /* ---------- settings ---------- */
@@ -891,7 +977,7 @@
   }
 
   /* ---------- TV remote: spatial navigation + back ---------- */
-  try { if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ColorF0Red'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} }); } catch (e) {}
+  try { if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ColorF0Red', 'ColorF2Yellow', 'ColorF3Blue'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} }); } catch (e) {}
   function topRoot() {
     var ov = document.querySelectorAll('.overlay:not(.hidden)'), best = null, bz = -1;
     each(ov, function (o) { var z = +getComputedStyle(o).zIndex || 0; if (z >= bz) { bz = z; best = o; } });
@@ -920,7 +1006,8 @@
     if (isShown('profedit')) return show('profedit', false), true;
     if (isShown('player')) return closePlayer(), true;
     if (isShown('fpanel')) return show('fpanel', false), true;
-    if (isShown('detail')) return show('detail', false), true;
+    if (isShown('detail')) return $('d-close').onclick(), true;
+    if (isShown('allview')) return $('a-close').onclick(), true;
     if (isShown('login') && sources.length) return $('s-cancel').onclick(), true;
     if (isShown('main') && state.tab !== settings.startTab) return setTab(settings.startTab), true;
     return false;
@@ -932,6 +1019,7 @@
       if (k === 10009 && window.tizen) { try { tizen.application.getCurrentApplication().exit(); } catch (x) {} }
       return;
     }
+    if ((k === 405 || k === 406 || k === 403 || k === 70) && !typing && ae && ae._mt) { quickToggle(ae._mt[0], ae._mt[1], ae); e.preventDefault(); return; }
     if (k === 10252 || k === 415 || k === 19) { if (video.paused) video.play(); else video.pause(); return; }
     var dir = { 37: 'L', 38: 'U', 39: 'R', 40: 'D' }[k];
     if (!dir) return;

@@ -7,8 +7,10 @@ profiles, favourites and watch progress are stored only on the device.
 **Live web app:** https://rainer-silva.github.io/maximus-tv-web/
 
 ## Features
-- Netflix-style Home: featured movie plus swipeable rows (new and top-rated movies, series by genre, live TV by type and country), each with **See all**
-- "Who's watching?" profiles with optional PIN, per-profile favourites, Continue watching and recent channels
+- Netflix-style Home: personal rows on top (Continue watching, Watch later, Favourite channels, Recently watched, each with See all), then a featured movie and swipeable catalogue rows (new and top-rated movies, series by genre, live TV by type and country)
+- "Who's watching?" profiles with optional PIN; per-profile Watch later (movies and series), favourite channels (pinned first in Live TV), Continue watching and recent channels
+- Long-press a card (touch), or press the yellow/blue key on the TV remote, to add it to Watch later or favourites
+- A–Z sorting for filters and categories, plus an A–Z / Default toggle in lists
 - Live TV / Movies / Series browsing with Continent, Country, Language and Type filters (see `CLASSIFICATION.md`)
 - Search across the whole catalogue
 - Several IPTV sources (Xtream, M3U link, M3U file) you can switch between in Settings → Configure IPTV

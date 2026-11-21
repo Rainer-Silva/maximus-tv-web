@@ -149,3 +149,19 @@ nav::-webkit-scrollbar{display:none}
 .hplay{background:#fff;color:#000}
 @media (max-width:760px){.hero{min-height:0;padding:16px;gap:14px}.hposter{width:110px;height:165px}.htitle{font-size:20px}.hbtns .btn{padding:10px 14px;font-size:14px}}
 @media (min-width:1600px){.hero{min-height:420px;padding:36px}.hposter{width:220px;height:330px}.htitle{font-size:44px}.hmeta{font-size:20px}.seeall{font-size:20px}.rowhead h3{font-size:26px}}
+
+/* v0.6.3: left-aligned filter lists, sort toggle, toast, My list */
+#f-opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+#f-opts .chip.opt{display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:left;border-radius:10px;width:100%}
+#f-opts .chip.opt span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#f-opts .status{grid-column:1/-1}
+.cat{text-align:left}
+.gtop{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sortbtn{font-size:13px;padding:6px 12px;margin-right:12px;white-space:nowrap}
+#toast{position:fixed;left:50%;bottom:calc(30px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#222;color:#fff;padding:12px 18px;border-radius:12px;font-weight:600;z-index:200;opacity:0;transition:opacity .2s;pointer-events:none;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+#toast.show{opacity:1}
+.item{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+@media (max-width:760px){#f-opts{grid-template-columns:1fr}}
+@media (min-width:1600px){.sortbtn{font-size:18px}#toast{font-size:22px}}
+#allview{z-index:45;overflow-y:auto}
+.personal .rowhead h3{color:#fff}
