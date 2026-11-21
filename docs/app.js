@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.5';
+  var VERSION = '0.6.6';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -218,6 +218,7 @@
   }
   var ADULT_RE = /adult|xxx|18\+|porn/i;
   function indexFor(type) {
+    if (type === 'live') { sibIdx = null; setTimeout(loadLogos, 0); }
     var ac = adultCats[type] = {};
     var K = window.MTVClassify, ctags = {};
     cats[type].forEach(function (c) { if (ADULT_RE.test(c.n)) ac[c.id] = 1; var t = K.classifyCat(c.n, type); t.cn = K.continents(t.co); ctags[c.id] = t; });
@@ -645,11 +646,81 @@
     st.shown = end; grid.appendChild(frag);
     if (end < st.items.length) { var m = el('button', 'f btn ghost more', 'Show more (' + (st.items.length - end) + ' left)'); m.onclick = function () { renderMore(t, grid, st); }; grid.appendChild(m); }
   }
+  /* ---------- artwork: lazy <img> with fallbacks (https upgrade -> proxy -> sibling logo -> iptv-org logo -> generated tile) ---------- */
+  var LK = window.MTVLogoKey, logoIdx = null, logoLoading = null, sibIdx = null;
+  function loadLogos() {
+    if (logoIdx || logoLoading || !LK) return logoLoading;
+    logoLoading = getText('logos-index.json?v=' + VERSION, 60000).then(function (t) { logoIdx = JSON.parse(t); retryTiles(); }).catch(function () { logoLoading = null; });
+    return logoLoading;
+  }
+  function buildSib() {
+    sibIdx = {}; var d = data.live || [];
+    for (var i = 0; i < d.length; i++) { var p = d[i].p; if (!p || !/^https:/i.test(p)) continue; var k = LK.logoKey(d[i].n); if (!sibIdx[k.key + '|' + k.cc]) sibIdx[k.key + '|' + k.cc] = p; if (!sibIdx[k.key]) sibIdx[k.key] = p; }
+  }
+  function matchLogo(it) {
+    if (!LK) return [];
+    if (!sibIdx && data.live) buildSib();
+    var k = LK.logoKey(it.n), out = [], co = it.t && it.t.co && it.t.co[0] ? String(it.t.co[0]).toLowerCase() : '';
+    if (co === 'uk') co = 'gb';
+    var cc = k.cc || (co.length === 2 ? co : '');
+    if (sibIdx) { var sb = sibIdx[k.key + '|' + cc] || sibIdx[k.key]; if (sb) out.push(sb); }
+    if (logoIdx) {
+      var keys = [k.key + '|' + cc, k.keyNoTv + '|' + cc, k.key, k.keyNoTv];
+      for (var j = 0; j < keys.length; j++) { var x = logoIdx.k[keys[j]]; if (x !== undefined) { out.push('https://' + logoIdx.u[x]); break; } }
+    }
+    return out;
+  }
+  function picCands(type, it) {
+    var c = [], p = it.p ? String(it.p) : '';
+    if (/^http:\/\//i.test(p)) { c.push(p.replace(/^http:/i, 'https:')); c.push('https://images.weserv.nl/?url=' + encodeURIComponent(p) + '&w=400&we'); }
+    else if (p) c.push(p);
+    if (type === 'live') c = c.concat(matchLogo(it));
+    var seen = {}; return c.filter(function (u) { if (seen[u]) return false; seen[u] = 1; return true; });
+  }
+  function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
+  function cleanName(n) {
+    var t = String(n || '').replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/^\s*\|?\s*[A-Z]{2,3}\s*[|:]\s*/, '').split(/\s+/).filter(Boolean);
+    while (t.length > 1 && (/^(HD|FHD|UHD|SD|4K|8K|HEVC|H265|RAW|ᴴᴰ)$/i.test(t[t.length - 1]) || (LK && /^[A-Z]{2,3}$/.test(t[t.length - 1]) && LK.CC[t[t.length - 1]]))) t.pop();
+    return t.join(' ') || String(n || '');
+  }
+  function tile(box, type, it) {
+    var name = cleanName(it.n), h = hue(name);
+    box.className = 'img tile' + (name.length > 14 || Math.max.apply(null, name.split(' ').map(function (w) { return w.length; })) > 9 ? ' long' : '');
+    box.style.background = 'linear-gradient(135deg,hsl(' + h + ',55%,32%),hsl(' + ((h + 40) % 360) + ',60%,18%))';
+    box.innerHTML = '<b>' + esc(name) + '</b>';
+  }
+  function setPic(box, type, it) {
+    var cands = picCands(type, it), i = 0;
+    box._pic = [type, it];
+    if (!cands.length) { tile(box, type, it); if (type === 'live' && !logoIdx) { box.setAttribute('data-retry', '1'); loadLogos(); } return; }
+    var im = document.createElement('img');
+    im.className = 'pic'; im.alt = ''; im.setAttribute('loading', 'lazy'); im.setAttribute('decoding', 'async'); im.referrerPolicy = 'no-referrer';
+    im.onerror = function () {
+      i++;
+      if (i >= cands.length && type === 'live') { var tried = {}; cands.forEach(function (u) { tried[u] = 1; }); matchLogo(it).forEach(function (u) { if (!tried[u]) cands.push(u); }); }
+      if (i < cands.length) { im.src = cands[i]; return; }
+      if (type === 'live' && !logoIdx) { box.setAttribute('data-retry', '1'); loadLogos(); }
+      tile(box, type, it);
+    };
+    im.src = cands[0];
+    box._bad = {}; im.addEventListener('error', function () { box._bad[im.src] = 1; });
+    box.innerHTML = ''; box.appendChild(im);
+  }
+  function retryTiles() {
+    each(document.querySelectorAll('.img[data-retry]'), function (box) {
+      box.removeAttribute('data-retry'); var t = box._pic; if (!t) return;
+      var bad = box._bad || {}, m = matchLogo(t[1]).filter(function (u) { return !bad[u]; }); if (!m.length) return;
+      box.className = 'img'; box.style.background = ''; box.innerHTML = '';
+      var im = document.createElement('img'); im.className = 'pic'; im.alt = ''; im.setAttribute('loading', 'lazy'); im.referrerPolicy = 'no-referrer';
+      var j = 0; im.onerror = function () { j++; if (j < m.length) im.src = m[j]; else tile(box, t[0], t[1]); };
+      im.src = m[0]; box.appendChild(im);
+    });
+  }
   function card(type, it, sub) {
     var b = el('button', 'f item ' + type);
-    var img = el('div', 'img', it.p ? '' : esc(type === 'live' ? 'LIVE' : 'NO IMAGE'));
-    if (it.p) img.style.backgroundImage = 'url("' + String(it.p).replace(/"/g, '%22') + '")';
+    var img = el('div', 'img');
     b.appendChild(img);
+    setPic(img, type, it);
     b.appendChild(el('div', 't', esc(it.n)));
     var meta = sub || (type === 'live' ? 'Live' : type === 'vod' ? 'Movie' : 'Series');
     if (!sub && it.r && it.r !== '0') meta += ' · ★ ' + esc(String(it.r).slice(0, 3));

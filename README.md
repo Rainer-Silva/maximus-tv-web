@@ -11,6 +11,7 @@ profiles, favourites and watch progress are stored only on the device.
 - "Who's watching?" profiles with optional PIN; per-profile Watch later (movies and series), favourite channels (pinned first in Live TV), Continue watching and recent channels
 - Long-press a card (touch), or press the yellow/blue/Info key on the TV remote, to add it to Watch later or favourites; on the personal Home rows the same gesture opens a menu with Play and Remove. Settings → Profile can clear Continue watching and Recently watched
 - Updates load automatically: the app checks version.json on start and when brought back, and reloads itself if a newer version is live (version shown next to the logo)
+- Channel logos: http icons are upgraded to https or proxied (images.weserv.nl); missing or dead icons fall back to a same-name channel's logo, then to the open [iptv-org](https://github.com/iptv-org/api) logo database (`src/logos-index.json`, rebuild with `REFRESH_LOGOS=1 ./build.sh`), then to a coloured name tile. Images lazy-load.
 - A–Z sorting for filters and categories, plus an A–Z / Default toggle in lists
 - Live TV / Movies / Series browsing with Continent, Country, Language and Type filters (see `CLASSIFICATION.md`)
 - Search across the whole catalogue
