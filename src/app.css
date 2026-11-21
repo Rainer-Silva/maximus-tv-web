@@ -167,3 +167,5 @@ nav::-webkit-scrollbar{display:none}
 .personal .rowhead h3{color:#fff}
 .brand .ver{font-size:11px;opacity:.55;margin-left:6px;font-weight:600;align-self:flex-end}
 @media (min-width:1600px){.brand .ver{font-size:15px}}
+#cmenu{z-index:85}.cmopts{display:flex;flex-direction:column;gap:10px}.cmopts .btn{width:100%;padding:14px;font-size:16px}.btn.danger{background:#3a1216;color:#ff6b76}
+@media (min-width:1600px){.cmopts .btn{font-size:22px;padding:18px}}

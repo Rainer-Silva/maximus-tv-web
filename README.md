@@ -9,7 +9,8 @@ profiles, favourites and watch progress are stored only on the device.
 ## Features
 - Netflix-style Home: personal rows on top (Continue watching, Watch later, Favourite channels, Recently watched, each with See all), then a featured movie and swipeable catalogue rows (new and top-rated movies, series by genre, live TV by type and country)
 - "Who's watching?" profiles with optional PIN; per-profile Watch later (movies and series), favourite channels (pinned first in Live TV), Continue watching and recent channels
-- Long-press a card (touch), or press the yellow/blue key on the TV remote, to add it to Watch later or favourites
+- Long-press a card (touch), or press the yellow/blue/Info key on the TV remote, to add it to Watch later or favourites; on the personal Home rows the same gesture opens a menu with Play and Remove. Settings → Profile can clear Continue watching and Recently watched
+- Updates load automatically: the app checks version.json on start and when brought back, and reloads itself if a newer version is live (version shown next to the logo)
 - A–Z sorting for filters and categories, plus an A–Z / Default toggle in lists
 - Live TV / Movies / Series browsing with Continent, Country, Language and Type filters (see `CLASSIFICATION.md`)
 - Search across the whole catalogue
