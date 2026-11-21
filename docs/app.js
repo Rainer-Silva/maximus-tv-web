@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.3';
+  var VERSION = '0.6.4';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -1038,5 +1038,30 @@
   if (activeId && !src()) activeId = null;
   if (!activeId && sources[0]) activeId = sources[0].id;
   showProfiles();
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(function () {});
+  /* ---------- always run the latest deployed version ---------- */
+  each(document.querySelectorAll('.ver'), function (e) { e.textContent = 'v' + VERSION; });
+  var seen = lsGet('mtv_seen_ver', null);
+  if (seen && seen !== VERSION) setTimeout(function () { toast('Updated to v' + VERSION); }, 800);
+  lsSet('mtv_seen_ver', VERSION);
+  function hardRefresh(v) {
+    if (ssGet('mtv_upd_try') === v) return; // loop guard: one forced reload per new version per session
+    ssSet('mtv_upd_try', v);
+    var jobs = [];
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); }));
+    if (window.caches && caches.keys) jobs.push(caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }));
+    Promise.all(jobs).catch(function () {}).then(function () { location.reload(); });
+  }
+  function checkVersion() {
+    if (location.protocol !== 'https:') return;
+    var x = new XMLHttpRequest();
+    x.open('GET', 'version.json?t=' + Date.now(), true);
+    try { x.setRequestHeader('Cache-Control', 'no-cache'); } catch (e) {}
+    x.onload = function () { try { var v = JSON.parse(x.responseText).version; if (v && v !== VERSION && !isShown('player')) hardRefresh(v); } catch (e) {} };
+    x.send();
+  }
+  checkVersion();
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (r) { try { r.update(); } catch (e) {} }).catch(function () {});
+  }
 })();
