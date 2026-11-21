@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.6';
+  var VERSION = '0.6.7';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -12,7 +12,13 @@
 
   /* ---------- storage ---------- */
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
-  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  // Durable keys (login, sources, profiles, settings, per-profile data) are mirrored to IndexedDB and restored if
+  // localStorage ever loses them. NOTHING in update/reload/cache code may delete these; only explicit user actions do.
+  var DURABLE = /^mtv_(profiles|settings|sources|active|last_profile|pd_.+|sort_az|seen_ver)$/;
+  var bootHad = {}; try { for (var bi = 0; bi < localStorage.length; bi++) { var bk = localStorage.key(bi); if (DURABLE.test(bk)) bootHad[bk] = 1; } } catch (e) {}
+  var backupReady = false, backupQueue = {};
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} if (DURABLE.test(k)) { if (backupReady) idbPut('bk:' + k, v); else backupQueue[k] = 1; } }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} if (DURABLE.test(k)) { delete backupQueue[k]; idbDel('bk:' + k); } } // explicit user actions only
   function ssGet(k, d) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function ssSet(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
   var DEFAULTS = { startTab: 'home', hideAdult: true, parentalPin: '', audioLang: '', subLang: '', format: 'm3u8', buffer: 30, epgOffset: 0, theme: 'dark', remember: true };
@@ -22,7 +28,7 @@
   function loadSources() { return settings.remember ? lsGet('mtv_sources', []) : ssGet('mtv_sources', []); }
   function saveSources() {
     if (settings.remember) { lsSet('mtv_sources', sources); try { sessionStorage.removeItem('mtv_sources'); } catch (e) {} }
-    else { ssSet('mtv_sources', sources); try { localStorage.removeItem('mtv_sources'); } catch (e) {} }
+    else { ssSet('mtv_sources', sources); lsDel('mtv_sources'); }
   }
   var sources = loadSources();
   var activeId = lsGet('mtv_active', null);
@@ -364,7 +370,7 @@
     modal({ title: 'Delete profile "' + p.name + '"?', text: 'Its favourites and watch history on this device are removed.', ok: 'Delete' }).then(function (ok) {
       if (!ok) return;
       profiles = profiles.filter(function (x) { return x !== p; }); lsSet('mtv_profiles', profiles);
-      try { localStorage.removeItem('mtv_pd_' + p.id); } catch (e) {}
+      lsDel('mtv_pd_' + p.id);
       show('profedit', false);
       if (profile === p) { profile = null; showProfiles(); } else if (isShown('profiles')) renderProfiles(); else renderSettings();
     });
@@ -1000,6 +1006,7 @@
     h += '<div class="card"><h3>Profile</h3>' + row('<span class="avatar" style="display:inline-flex;background:' + esc(profile.color) + '">' + esc(profile.emoji) + '</span> ' + esc(profile.name), profile.kids ? 'Kids profile' : '', '<button class="f btn ghost small" id="st-editp">Edit</button> <button class="f btn ghost small" id="st-switch">Switch profile</button>') +
       row('Continue watching', Object.keys(pdata.resume).length + ' saved', '<button class="f btn ghost small" id="st-clrcont">Clear</button>') +
       row('Recently watched', pdata.recent.length + ' channels', '<button class="f btn ghost small" id="st-clrrec">Clear</button>') + '</div>';
+    h += '<div class="card"><h3>Backup &amp; restore</h3>' + row('Back up profiles, favourites, Watch later and settings', 'Keep the code somewhere safe (Notes, email to yourself). Logins are left out unless you tick the box.', '<button class="f btn ghost small" id="st-export">Export</button> <button class="f btn ghost small" id="st-import">Import</button>') + '</div>';
     h += '<div class="card"><h3>Configure IPTV</h3><div id="st-sources"></div><div class="btnrow"><button class="f btn small" id="st-add">+ Add source (Xtream, M3U link or file)</button></div></div>';
     h += '<div class="card"><h3>General</h3>' +
       row('Start on', '', sel('st-start', [['home', 'Home'], ['live', 'Live TV'], ['vod', 'Movies'], ['series', 'Series'], ['search', 'Search']], settings.startTab)) +
@@ -1037,6 +1044,8 @@
     });
     $('st-editp').onclick = function () { editProfile(profile); };
     $('st-switch').onclick = function () { managing = false; showProfiles(); };
+    $('st-export').onclick = function () { openBackup('export'); };
+    $('st-import').onclick = function () { openBackup('import'); };
     $('st-clrcont').onclick = function () { modal({ title: 'Clear Continue watching?', text: 'Saved positions for ' + profile.name + ' are removed on this device.', ok: 'Clear' }).then(function (ok) { if (ok) { pdata.resume = {}; savePdata(); toast('Continue watching cleared'); } renderSettings(); }); };
     $('st-clrrec').onclick = function () { modal({ title: 'Clear Recently watched?', text: 'The recent channels list for ' + profile.name + ' is emptied.', ok: 'Clear' }).then(function (ok) { if (ok) { pdata.recent = []; savePdata(); toast('Recently watched cleared'); } renderSettings(); }); };
     $('st-add').onclick = function () { openSourceForm(null); };
@@ -1062,11 +1071,51 @@
         if (!ok) return;
         sources.forEach(function (x) { idbDel('file:' + x.id); });
         sources = []; activeId = null; saveSources(); lsSet('mtv_active', null);
-        try { localStorage.removeItem('mtv_sources'); sessionStorage.removeItem('mtv_sources'); } catch (e) {}
+        lsDel('mtv_sources'); try { sessionStorage.removeItem('mtv_sources'); } catch (e) {}
         idbClearCatalogue(); resetData(); openSourceForm(null);
       });
     };
   }
+  /* ---------- export / import ---------- */
+  function makeBackup(withLogins) {
+    var o = { app: 'maximus-tv', v: VERSION, at: new Date().toISOString(), ls: {} };
+    try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (DURABLE.test(k) && k !== 'mtv_seen_ver') o.ls[k] = lsGet(k, null); } } catch (e) {}
+    var srcs = sources.map(function (x) { var c = {}; for (var k in x) c[k] = x[k]; if (!withLogins) { delete c.pass; } return c; });
+    o.ls.mtv_sources = srcs; o.withLogins = !!withLogins;
+    var json = JSON.stringify(o);
+    return 'MTV1:' + btoa(unescape(encodeURIComponent(json)));
+  }
+  function readBackup(code) {
+    code = String(code || '').trim(); if (code.indexOf('MTV1:') === 0) code = code.slice(5);
+    var o = JSON.parse(code.charAt(0) === '{' ? code : decodeURIComponent(escape(atob(code))));
+    if (!o || o.app !== 'maximus-tv' || !o.ls) throw new Error('Not a Maximus TV backup');
+    return o;
+  }
+  function openBackup(mode) {
+    show('backup', true);
+    $('b-title').textContent = mode === 'export' ? 'Export backup' : 'Import backup';
+    show('b-exportrow', mode === 'export'); show('b-go', mode === 'import'); show('b-file', mode === 'import'); show('b-copy', mode === 'export'); show('b-dl', mode === 'export');
+    $('b-msg').textContent = mode === 'export' ? 'Copy this code (or download the file) and keep it safe.' : 'Paste a backup code or choose a backup file, then tap Restore.';
+    var ta = $('b-code'); ta.value = mode === 'export' ? makeBackup($('b-logins').checked) : ''; ta.readOnly = mode === 'export';
+    focusLater(mode === 'export' ? $('b-copy') : ta);
+  }
+  $('b-logins').onchange = function () { $('b-code').value = makeBackup($('b-logins').checked); };
+  $('b-copy').onclick = function () { var ta = $('b-code'); ta.select(); try { (navigator.clipboard ? navigator.clipboard.writeText(ta.value) : Promise.reject()).then(function () { toast('Backup code copied'); }, function () { document.execCommand('copy'); toast('Backup code copied'); }); } catch (e) { document.execCommand('copy'); } };
+  $('b-dl').onclick = function () { var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([$('b-code').value], { type: 'text/plain' })); a.download = 'maximus-tv-backup-' + new Date().toISOString().slice(0, 10) + '.txt'; document.body.appendChild(a); a.click(); setTimeout(function () { document.body.removeChild(a); }, 500); };
+  $('b-file').onchange = function () { var f = this.files && this.files[0]; if (!f) return; var r = new FileReader(); r.onload = function () { $('b-code').value = r.result; }; r.readAsText(f); };
+  $('b-go').onclick = function () {
+    var o; try { o = readBackup($('b-code').value); } catch (e) { $('b-msg').textContent = 'That code is not valid: ' + e.message; return; }
+    var cur = {}; sources.forEach(function (x) { cur[x.id] = x; });
+    Object.keys(o.ls).forEach(function (k) {
+      if (!DURABLE.test(k)) return;
+      var v = o.ls[k];
+      if (k === 'mtv_sources') { v = v.map(function (x) { if (!x.pass && cur[x.id] && cur[x.id].pass) x.pass = cur[x.id].pass; return x; }); settings.remember = true; saveSettings(); }
+      lsSet(k, v);
+    });
+    $('b-msg').textContent = 'Restored. Reloading…';
+    setTimeout(function () { location.reload(); }, 600);
+  };
+  $('b-close').onclick = function () { show('backup', false); };
   function setPin() {
     var go = function () {
       modal({ title: 'New parental PIN', text: '4–8 digits', pin: true, minLen: 4 }).then(function (p) { if (p) { settings.parentalPin = p; saveSettings(); renderSettings(); } });
@@ -1103,6 +1152,7 @@
     if (isShown('modal')) return modalCb && modalCb(false), true;
     if (isShown('profedit')) return show('profedit', false), true;
     if (isShown('cmenu')) return show('cmenu', false), true;
+    if (isShown('backup')) return show('backup', false), true;
     if (isShown('player')) return closePlayer(), true;
     if (isShown('fpanel')) return show('fpanel', false), true;
     if (isShown('detail')) return $('d-close').onclick(), true;
@@ -1137,11 +1187,42 @@
   if (activeId && !src()) activeId = null;
   if (!activeId && sources[0]) activeId = sources[0].id;
   showProfiles();
+  /* ---------- durable storage: mirror + restore ---------- */
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {}); } catch (e) {}
+  (function syncBackup() {
+    db().then(function (d) {
+      if (!d) return;
+      var have = {};
+      try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (DURABLE.test(k)) have[k] = 1; } } catch (e) {}
+      var st; try { st = d.transaction('kv', 'readonly').objectStore('kv'); } catch (e) { backupReady = true; return; }
+      var q = st.openCursor(), missing = [];
+      q.onsuccess = function () {
+        var c = q.result;
+        if (c) { var key = String(c.key); if (key.indexOf('bk:') === 0) { var lk = key.slice(3); if (!bootHad[lk] && c.value.v != null) missing.push([lk, c.value.v]); else if (bootHad[lk]) delete have[lk]; } c.continue(); return; }
+        // keys that were missing from localStorage when the app started but exist in the backup -> restore, reload once
+        if (missing.length && !ssGet('mtv_restored', false)) {
+          missing.forEach(function (m) { try { localStorage.setItem(m[0], JSON.stringify(m[1])); } catch (e) {} });
+          ssSet('mtv_restored', true); location.reload(); return;
+        }
+        backupReady = true;
+        // mirror everything that is in localStorage now (first run, or keys written during this boot)
+        Object.keys(have).concat(Object.keys(backupQueue)).forEach(function (k) { var v = lsGet(k, null); if (v != null) idbPut('bk:' + k, v); });
+        backupQueue = {};
+      };
+    });
+  })();
+
   /* ---------- always run the latest deployed version ---------- */
   each(document.querySelectorAll('.ver'), function (e) { e.textContent = 'v' + VERSION; });
   var seen = lsGet('mtv_seen_ver', null);
   if (seen && seen !== VERSION) setTimeout(function () { toast('Updated to v' + VERSION); }, 800);
   lsSet('mtv_seen_ver', VERSION);
+  function safeToReload() {
+    var a = document.activeElement;
+    if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return false;
+    return !(isShown('player') || isShown('login') || isShown('profedit') || isShown('modal') || isShown('profiles') && managing);
+  }
+  // Update = unregister service worker + clear Cache Storage (app files) ONLY. Never localStorage / IndexedDB / sessionStorage.
   function hardRefresh(v) {
     if (ssGet('mtv_upd_try') === v) return; // loop guard: one forced reload per new version per session
     ssSet('mtv_upd_try', v);
@@ -1155,7 +1236,7 @@
     var x = new XMLHttpRequest();
     x.open('GET', 'version.json?t=' + Date.now(), true);
     try { x.setRequestHeader('Cache-Control', 'no-cache'); } catch (e) {}
-    x.onload = function () { try { var v = JSON.parse(x.responseText).version; if (v && v !== VERSION && !isShown('player')) hardRefresh(v); } catch (e) {} };
+    x.onload = function () { try { var v = JSON.parse(x.responseText).version; if (v && v !== VERSION && safeToReload()) hardRefresh(v); } catch (e) {} };
     x.send();
   }
   checkVersion();
