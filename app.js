@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.0';
+  var VERSION = '0.6.1';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -296,7 +296,8 @@
       if (editingSrc) { for (var i = 0; i < sources.length; i++) if (sources[i].id === s.id) sources[i] = s; } else sources.push(s);
       saveSources(); activeId = s.id; lsSet('mtv_active', activeId);
       err.textContent = ''; resetData();
-      show('login', false);
+      show('login', false); window.scrollTo(0, 0);
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       if (!profile) return showProfiles();
       show('main', true); setTab(settings.startTab);
     }).catch(function (x) { err.textContent = 'Could not connect: ' + x.message; });
@@ -381,13 +382,33 @@
   }
 
   /* ---------- home: continue watching, favourites, recent channels ---------- */
+  var POPULAR = ['svt1 hd', 'svt2 hd', 'tv4 hd', 'kanal 5 hd', 'tv3 hd', 'eurosport 1', 'cnn international', 'bbc world news', 'discovery channel', 'national geographic', 'sky news', 'al jazeera', 'globo', 'tv6 hd', 'sjuan', 'disney channel'];
+  function popularChannels() {
+    var d = data.live || [], out = [], seen = {};
+    POPULAR.forEach(function (p) {
+      for (var i = 0; i < d.length; i++) { var it = d[i]; if (it.k.indexOf(p) === 0 && visible('live', it) && !seen[it.id]) { seen[it.id] = 1; out.push(it); break; } }
+    });
+    if (out.length < 8) for (var j = 0; j < d.length && out.length < 12; j++) if (d[j].p && visible('live', d[j]) && !seen[d[j].id] && !/^-=/.test(d[j].n)) { seen[d[j].id] = 1; out.push(d[j]); }
+    return out.slice(0, 14);
+  }
+  function featuredMovies() {
+    var d = data.vod || []; if (!d.length || !cats.vod.length) return [];
+    var c = cats.vod.filter(function (x) { return /premiere|new|top|imdb/i.test(x.n) && !adultCats.vod[x.id]; })[0] || cats.vod[0];
+    return d.filter(function (it) { return it.c === c.id && it.p && visible('vod', it); }).slice(0, 14);
+  }
   function renderHome() {
     var box = $('home-rows'); box.innerHTML = '';
+    window.scrollTo(0, 0);
     var sid = src() ? src().id : '';
     var cont = Object.keys(pdata.resume).map(function (k) { return pdata.resume[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; }).slice(0, 20);
     var favs = Object.keys(pdata.fav).map(function (k) { return pdata.fav[k]; }).filter(function (r) { return r.src === sid; }).sort(function (a, b) { return b.ts - a.ts; });
     var rec = pdata.recent.filter(function (r) { return r.src === sid; }).slice(0, 20);
     box.appendChild(el('h2', '', 'Hi ' + esc(profile.name) + ' ' + esc(profile.emoji)));
+    var q = el('div', 'quick');
+    [['live', '📺', 'Live TV'], ['vod', '🎬', 'Movies'], ['series', '🍿', 'Series'], ['search', '🔍', 'Search']].forEach(function (x) {
+      var b = el('button', 'f qbtn', '<span class="qi">' + x[1] + '</span>' + x[2]); b.onclick = function () { setTab(x[0]); }; q.appendChild(b);
+    });
+    box.appendChild(q);
     function shelf(title, list, mk) { if (!list.length) return; box.appendChild(el('h3', '', title)); var s = el('div', 'shelf'); list.forEach(function (r) { s.appendChild(mk(r)); }); box.appendChild(s); }
     shelf('Continue watching', cont, function (r) {
       var c = card(r.type, r.item, r.label);
@@ -398,8 +419,18 @@
     });
     shelf('Recently watched channels', rec, function (r) { return card('live', r.item); });
     shelf('My favourites', favs, function (r) { return card(r.type, r.item); });
-    if (!cont.length && !favs.length && !rec.length) box.appendChild(el('p', 'note', 'Nothing here yet. Watch a channel, movie or episode, or tap ☆ in the player to add favourites. They will show up here for this profile.'));
-    focusLater(box.querySelector('.item') || $('tabs').querySelector('.on'));
+    var disc = el('div', ''); box.appendChild(disc);
+    if (!cont.length && !favs.length && !rec.length) box.appendChild(el('p', 'note', 'Tip: tap ☆ in the player to add favourites. Things you watch appear under “Continue watching” for this profile.'));
+    focusLater(box.querySelector('.qbtn'));
+    if (!src()) return;
+    disc.innerHTML = '<div class="status">Loading popular channels…</div>';
+    Promise.all([ensure('live'), ensure('vod')]).then(function () {
+      if (state.tab !== 'home') return;
+      disc.innerHTML = '';
+      var pc = popularChannels(), fm = featuredMovies();
+      if (pc.length) { disc.appendChild(el('h3', '', 'Popular channels')); var s1 = el('div', 'shelf'); pc.forEach(function (it) { s1.appendChild(card('live', it)); }); disc.appendChild(s1); }
+      if (fm.length) { disc.appendChild(el('h3', '', 'New movies')); var s2 = el('div', 'shelf'); fm.forEach(function (it) { s2.appendChild(card('vod', it)); }); disc.appendChild(s2); }
+    }).catch(function (e) { disc.innerHTML = '<div class="status">Could not load: ' + esc(e.message) + '</div>'; });
   }
 
   /* ---------- filters ---------- */
@@ -793,6 +824,10 @@
     if (ae === video && (dir === 'L' || dir === 'R')) { video.currentTime += dir === 'R' ? 30 : -10; e.preventDefault(); return; }
     e.preventDefault(); move(dir);
   });
+
+  /* ---------- iOS: undo the page shift the on-screen keyboard leaves behind ---------- */
+  document.addEventListener('focusout', function (e) { if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) setTimeout(function () { var a = document.activeElement; if (!a || !/INPUT|SELECT|TEXTAREA/.test(a.tagName)) window.scrollTo(0, 0); }, 60); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { window.scrollTo(0, 0); }, 300); });
 
   /* ---------- boot ---------- */
   applyTheme();
