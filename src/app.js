@@ -8,7 +8,8 @@
   var cfg = null;          // {server, backup, user, pass, adult}
   var data = { live: null, vod: null, series: null };
   var cats = { live: null, vod: null, series: null };
-  var state = { tab: 'live', cat: null, shown: 0, items: [], sfilter: 'all', stack: [] };
+  var state = { tab: 'live', cat: null, shown: 0, items: [], sfilter: 'all', stack: [], f: { live: {}, vod: {}, series: {} } };
+  var DIMS = [['cn', 'Continent'], ['co', 'Country'], ['la', 'Language'], ['ty', 'Type']];
   var hls = null;
 
   /* ---------- storage ---------- */
@@ -87,14 +88,15 @@
         p: s.stream_icon || s.cover || '',
         x: s.container_extension || '',
         r: s.rating || '',
-        a: s.is_adult == 1 ? 1 : 0
+        a: s.is_adult == 1 ? 1 : 0,
+        g: type === 'series' ? (s.genre || '') : ''
       };
     }
     return out;
   }
   function ensure(type) {
     if (data[type]) return Promise.resolve();
-    var key = cfg.user + '@' + type;
+    var key = cfg.user + '@v2@' + type;
     return cacheGet(key).then(function (hit) {
       if (hit) { cats[type] = hit.cats; data[type] = hit.items; indexFor(type); return; }
       return Promise.all([api(ACT[type][0]), api(ACT[type][1], '', 240000)]).then(function (r) {
@@ -110,8 +112,16 @@
   function indexFor(type) {
     var ac = adultCats[type] = {};
     cats[type].forEach(function (c) { if (ADULT_RE.test(c.n)) ac[c.id] = 1; });
+    var K = window.MTVClassify, ctags = {};
+    cats[type].forEach(function (c) { var t = K.classifyCat(c.n, type); t.cn = K.continents(t.co); ctags[c.id] = t; });
+    var none = { co: [], la: [], ty: [], cn: [] };
     var d = data[type];
-    for (var i = 0; i < d.length; i++) d[i].k = norm(d[i].n);
+    for (var i = 0; i < d.length; i++) {
+      var it = d[i], ct = ctags[it.c] || none;
+      it.k = norm(it.n);
+      var x = K.classifyItem(it.n, type, ct, it.g);
+      if (x) { x.cn = K.continents(x.co); it.t = x; } else it.t = ct;
+    }
   }
   function visible(type, it) { return cfg.adult || (!it.a && !adultCats[type][it.c]); }
 
@@ -171,25 +181,81 @@
     show('settings', t === 'settings');
     if (t === 'search') { setTimeout(function () { $('q').focus(); }, 50); preloadAll(); return; }
     if (t === 'settings') return;
-    $('cats').innerHTML = ''; $('grid').innerHTML = '';
+    $('cats').innerHTML = ''; $('grid').innerHTML = ''; $('fbar').innerHTML = '';
     $('status').textContent = 'Loading… (first time can take up to a minute)';
     ensure(t).then(function () { if (state.tab === t) renderCats(t); })
       .catch(function (e) { $('status').textContent = 'Could not load: ' + e.message; });
   }
+  /* ---------- filters (continent / country / language / type) ---------- */
+  function active(t) { var f = state.f[t], n = 0; for (var k in f) if (f[k]) n++; return n; }
+  function matchF(t, it, skip) {
+    var f = state.f[t], tg = it.t;
+    for (var i = 0; i < DIMS.length; i++) {
+      var d = DIMS[i][0];
+      if (d === skip || !f[d]) continue;
+      if (!tg || tg[d].indexOf(f[d]) < 0) return false;
+    }
+    return true;
+  }
+  function label(d, v) { return d === 'co' ? (window.MTVClassify.COUNTRIES[v] || [v])[0] : v; }
+  function renderFbar(t) {
+    var bar = $('fbar'); bar.innerHTML = '';
+    DIMS.forEach(function (D) {
+      var v = state.f[t][D[0]];
+      var b = el('button', 'f fbtn' + (v ? ' on' : ''), esc(D[1]) + ': <b>' + esc(v ? label(D[0], v) : 'Any') + '</b> ▾');
+      b.onclick = function () { openFacet(t, D[0], D[1]); };
+      bar.appendChild(b);
+    });
+    if (active(t)) { var c = el('button', 'f fbtn clear', '✕ Clear filters'); c.onclick = function () { state.f[t] = {}; renderCats(t); }; bar.appendChild(c); }
+  }
+  function openFacet(t, d, title) {
+    var counts = {}, d0 = data[t];
+    for (var i = 0; i < d0.length; i++) {
+      var it = d0[i];
+      if (!visible(t, it) || !matchF(t, it, d)) continue;
+      var vals = it.t ? it.t[d] : [];
+      for (var j = 0; j < vals.length; j++) counts[vals[j]] = (counts[vals[j]] || 0) + 1;
+    }
+    var keys = Object.keys(counts).filter(function (k) { return cfg.adult || k !== 'Adult'; }).sort(function (a, b) { return counts[b] - counts[a]; });
+    $('f-title').textContent = title;
+    var box = $('f-opts'); box.innerHTML = '';
+    var cur = state.f[t][d];
+    var any = el('button', 'f chip' + (!cur ? ' on' : ''), 'Any'); any.onclick = function () { pickFacet(t, d, null); }; box.appendChild(any);
+    keys.forEach(function (k) {
+      var b = el('button', 'f chip' + (cur === k ? ' on' : ''), esc(label(d, k)) + ' <span class="cnt">' + counts[k] + '</span>');
+      b.onclick = function () { pickFacet(t, d, k); };
+      box.appendChild(b);
+    });
+    if (!keys.length) box.appendChild(el('div', 'status', 'No options with the current filters.'));
+    show('fpanel', true);
+    setTimeout(function () { (box.querySelector('.chip.on') || any).focus(); }, 30);
+  }
+  function pickFacet(t, d, v) {
+    state.f[t][d] = v;
+    if (d === 'cn' && v && state.f[t].co) { var cc = window.MTVClassify.COUNTRIES[state.f[t].co]; if (!cc || cc[2] !== v) state.f[t].co = null; }
+    show('fpanel', false);
+    renderCats(t);
+    setTimeout(function () { var b = $('fbar').children[DIMS.map(function (x) { return x[0]; }).indexOf(d)]; if (b) b.focus(); }, 30);
+  }
+  $('f-close').onclick = function () { show('fpanel', false); };
+
   function renderCats(t) {
+    renderFbar(t);
     var box = $('cats'); box.innerHTML = '';
-    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return cfg.adult || !adultCats[t][c.id]; }));
+    var filt = active(t), cnt = {};
+    if (filt) data[t].forEach(function (it) { if (visible(t, it) && matchF(t, it)) cnt[it.c] = (cnt[it.c] || 0) + 1; });
+    var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (cfg.adult || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }));
     list.forEach(function (c) {
-      var b = el('button', 'f cat', esc(c.n)); b.setAttribute('data-id', c.id);
+      var b = el('button', 'f cat', esc(c.n) + (filt && c.id !== '*' ? ' <span class="cnt">' + cnt[c.id] + '</span>' : '')); b.setAttribute('data-id', c.id);
       b.onclick = function () { pickCat(t, c.id); };
       box.appendChild(b);
     });
-    pickCat(t, list.length > 1 ? list[1].id : '*');
+    pickCat(t, filt || list.length < 2 ? '*' : list[1].id);
   }
   function pickCat(t, id) {
     state.cat = id;
     Array.prototype.forEach.call($('cats').children, function (b) { b.classList.toggle('on', b.getAttribute('data-id') === id); });
-    state.items = data[t].filter(function (it) { return (id === '*' || it.c === id) && visible(t, it); });
+    state.items = data[t].filter(function (it) { return (id === '*' || it.c === id) && visible(t, it) && matchF(t, it); });
     state.shown = 0; $('grid').innerHTML = '';
     $('status').textContent = state.items.length ? state.items.length + ' items' : 'Nothing here.';
     renderMore(t, $('grid'), state);
@@ -341,7 +407,7 @@
     if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ChannelUp', 'ChannelDown'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} });
   } catch (e) {}
   function focusables() {
-    var root = !$('player').classList.contains('hidden') ? $('player') : !$('detail').classList.contains('hidden') ? $('detail') : document;
+    var root = !$('player').classList.contains('hidden') ? $('player') : !$('fpanel').classList.contains('hidden') ? $('fpanel') : !$('detail').classList.contains('hidden') ? $('detail') : document;
     return Array.prototype.filter.call(root.querySelectorAll('.f'), function (n) { return n.offsetParent !== null || n === video; });
   }
   function move(dir) {
@@ -363,6 +429,7 @@
   }
   function back() {
     if (!$('player').classList.contains('hidden')) return closePlayer(), true;
+    if (!$('fpanel').classList.contains('hidden')) return show('fpanel', false), true;
     if (!$('detail').classList.contains('hidden')) return show('detail', false), true;
     if (state.tab !== 'live' && cfg) return setTab('live'), true;
     return false;

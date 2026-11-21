@@ -39,8 +39,11 @@
     </nav>
   </header>
   <section id="browse" class="pane">
-    <aside id="cats"></aside>
-    <div id="grid-wrap"><div id="status" class="status"></div><div id="grid" class="grid"></div></div>
+    <div id="fbar" class="fbar"></div>
+    <div class="bwrap">
+      <aside id="cats"></aside>
+      <div id="grid-wrap"><div id="status" class="status"></div><div id="grid" class="grid"></div></div>
+    </div>
   </section>
   <section id="search" class="pane hidden">
     <div class="searchbar">
@@ -75,12 +78,20 @@
   </div>
 </div>
 
+<div id="fpanel" class="overlay sheet hidden">
+  <div class="dbox">
+    <div class="fhead"><h2 id="f-title"></h2><button class="f btn ghost" id="f-close">✕ Close</button></div>
+    <div id="f-opts" class="chips"></div>
+  </div>
+</div>
+
 <div id="player" class="overlay hidden">
   <video id="video" controls playsinline autoplay></video>
   <div class="pbar"><button class="f btn ghost" id="p-close">✕ Close</button><span id="p-title"></span><span id="p-msg" class="err"></span></div>
 </div>
 
 <script src="hls.min.js"></script>
+<script src="classify.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
