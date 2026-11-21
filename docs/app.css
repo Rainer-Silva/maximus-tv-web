@@ -179,3 +179,5 @@ nav::-webkit-scrollbar{display:none}
 .item.live .img.tile b{font-size:20px}.item.live .img.tile.long b{font-size:15px}
 @media (min-width:1600px){.item .img.tile b{font-size:30px}.item .img.tile.long b{font-size:22px}}
 #backup{z-index:86}.bcode{width:100%;background:#111;color:#ddd;border:1px solid #333;border-radius:10px;padding:10px;font:12px ui-monospace,Menlo,monospace;word-break:break-all}
+
+#homelink{z-index:87}.hsteps{margin:8px 0 12px;padding-left:22px;line-height:1.5}.hsteps li{margin:4px 0}.note.warn{color:#fbbf24}

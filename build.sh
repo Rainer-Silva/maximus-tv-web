@@ -12,7 +12,11 @@ sed -i -E "s/(app\.css|app\.js|classify\.js|logokey\.js|hls\.min\.js)(\?v=[0-9.]
 sed -i -E "s/mtv-v[0-9.]+/mtv-v$VER/" src/sw.js
 printf '{"version":"%s"}\n' "$VER" > src/version.json
 cp -r src/. docs/ && touch docs/.nojekyll
-cp src/{index.html,app.css,app.js,classify.js,logokey.js,logos-index.json,hls.min.js,logo.svg,icon.png,icon-192.png,icon-512.png,apple-touch-icon.png} dist/tizen-stage/
+cp src/{index.html,app.css,app.js,classify.js,logokey.js,logos-index.json,hls.min.js,logo.svg,icon-192.png,icon-512.png,apple-touch-icon.png} dist/tizen-stage/
+# Tizen home icon must be 117x117; do not ship the service worker into the widget
+if [ -f tizen/icon.png ]; then cp tizen/icon.png dist/tizen-stage/icon.png; else cp src/icon.png dist/tizen-stage/icon.png; fi
+# never include sw.js / manifest.json in the TV package (they are for the HTTPS web app only)
 sed "s/version=\"[0-9.]*\" viewmodes/version=\"$VER\" viewmodes/" tizen/config.xml > dist/tizen-stage/config.xml
 python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', 'dist/tizen-stage')" "dist/maximus-tv-$VER-unsigned" && mv -f "dist/maximus-tv-$VER-unsigned.zip" "dist/maximus-tv-$VER-unsigned.wgt"
-echo "Built docs/ and dist/maximus-tv-$VER-unsigned.wgt (v$VER)"
+cp -f "dist/maximus-tv-$VER-unsigned.wgt" "dist/maximus-tv-$VER.wgt"
+echo "Built docs/ and dist/maximus-tv-$VER.wgt (unsigned, v$VER)"

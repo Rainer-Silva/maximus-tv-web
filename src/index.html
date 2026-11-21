@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
 <title>Maximus TV</title>
-<link rel="stylesheet" href="app.css?v=0.6.8">
+<link rel="stylesheet" href="app.css?v=0.6.9">
 </head>
 <body class="theme-dark">
 
@@ -129,6 +129,16 @@
     <div class="btnrow"><button class="f btn" id="b-copy">Copy code</button><button class="f btn ghost" id="b-dl">Download file</button><button class="f btn" id="b-go">Restore</button></div>
   </div>
 </div>
+<div id="homelink" class="overlay sheet hidden">
+  <div class="dbox narrow">
+    <div class="fhead"><h2>Home Screen login link</h2><button class="f btn ghost" id="h-done">Done</button></div>
+    <p class="note">Your login is now saved inside this page's link, so the Home Screen icon opens already logged in, even if the phone clears its storage.</p>
+    <ol id="h-steps" class="hsteps"></ol>
+    <p class="note warn">The link contains your IPTV password. Don't send it to anyone or post it.</p>
+    <textarea id="h-url" class="f bcode" rows="3" readonly spellcheck="false"></textarea>
+    <div class="btnrow"><button class="f btn" id="h-copy">Copy link</button></div>
+  </div>
+</div>
 <div id="cmenu" class="overlay sheet hidden">
   <div class="dbox narrow"><h2 id="cm-title"></h2><div id="cm-opts" class="cmopts"></div></div>
 </div>
@@ -166,9 +176,9 @@
   </div>
 </div>
 
-<script src="hls.min.js?v=0.6.8"></script>
-<script src="classify.js?v=0.6.8"></script>
-<script src="logokey.js?v=0.6.8"></script>
-<script src="app.js?v=0.6.8"></script>
+<script src="hls.min.js?v=0.6.9"></script>
+<script src="classify.js?v=0.6.9"></script>
+<script src="logokey.js?v=0.6.9"></script>
+<script src="app.js?v=0.6.9"></script>
 </body>
 </html>

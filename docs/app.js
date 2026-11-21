@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.8';
+  var VERSION = '0.6.9';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -17,7 +17,7 @@
   var DURABLE = /^mtv_(profiles|settings|sources|active|last_profile|pd_.+|sort_az|seen_ver)$/;
   var bootHad = {}; try { for (var bi = 0; bi < localStorage.length; bi++) { var bk = localStorage.key(bi); if (DURABLE.test(bk)) bootHad[bk] = 1; } } catch (e) {}
   var backupReady = false, backupQueue = {};
-  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} if (DURABLE.test(k)) { if (backupReady) idbPut('bk:' + k, v); else backupQueue[k] = 1; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} if (DURABLE.test(k)) { if (backupReady) idbPut('bk:' + k, v); else backupQueue[k] = 1; } if (k === 'mtv_profiles' || k === 'mtv_sources') syncHomeHash(); }
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} if (DURABLE.test(k)) { delete backupQueue[k]; idbDel('bk:' + k); } } // explicit user actions only
   function ssGet(k, d) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function ssSet(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -34,6 +34,67 @@
   var activeId = lsGet('mtv_active', null);
   var profiles = lsGet('mtv_profiles', []);
   var profile = null, pdata = null;
+
+  /* ---------- Home Screen login link: #setup=<base64url JSON> in the URL HASH (never sent to the server).
+     iOS gives each Home Screen icon its own empty storage and relaunches the URL it was saved with, so the
+     hash carries the login into the icon and stays there as a permanent fallback (never stripped in the app). */
+  function b64uEnc(t) { return btoa(unescape(encodeURIComponent(t))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function b64uDec(t) { t = t.replace(/-/g, '+').replace(/_/g, '/'); while (t.length % 4) t += '='; return decodeURIComponent(escape(atob(t))); }
+  function isStandalone() { try { return !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)); } catch (e) { return false; } }
+  function isIOS() { var u = navigator.userAgent || ''; return /iPhone|iPad|iPod/.test(u) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+  function setupFromHash() {
+    var m = String(location.hash || '').match(/[#&]setup=([A-Za-z0-9_\-]+)/); if (!m) return null;
+    try { var o = JSON.parse(b64uDec(m[1])); return o && o.app === 'mtv' && o.s ? { o: o, fp: m[1].slice(-32) } : null; } catch (e) { return null; }
+  }
+  function homePayload() {
+    var srcs = sources.filter(function (x) { return x.type !== 'file'; }).map(function (x) {
+      var c = {}; ['id', 'name', 'type', 'server', 'backup', 'user', 'pass', 'url', 'epg'].forEach(function (k) { if (x[k]) c[k] = x[k]; }); return c;
+    });
+    var ps = profiles.map(function (x) { return { id: x.id, name: x.name, emoji: x.emoji, color: x.color, pin: x.pin || '', kids: !!x.kids }; });
+    return { app: 'mtv', v: 1, s: srcs, p: ps, a: activeId, lp: profile ? profile.id : lsGet('mtv_last_profile', null) };
+  }
+  function homeHash() { return '#setup=' + b64uEnc(JSON.stringify(homePayload())); }
+  function dropManifest() { var l = document.querySelector('link[rel="manifest"]'); if (l && l.parentNode) l.parentNode.removeChild(l); } // iOS then saves the current URL (with the hash)
+  function setHomeLink() {
+    try { localStorage.removeItem('mtv_setup_skip'); } catch (e) {}
+    try { history.replaceState(null, '', location.pathname + location.search + homeHash()); } catch (e) { location.hash = homeHash().slice(1); }
+    dropManifest();
+    return location.href;
+  }
+  var hashTimer = null;
+  function syncHomeHash() { // keep the link in the Safari address bar current (only before it is saved as an icon)
+    if (isStandalone() || !/[#&]setup=/.test(location.hash || '')) return;
+    clearTimeout(hashTimer);
+    hashTimer = setTimeout(function () { if (sources.some(function (x) { return x.type !== 'file'; })) { try { history.replaceState(null, '', location.pathname + location.search + homeHash()); } catch (e) {} } }, 50);
+  }
+  function forgetHomeLink() { // explicit sign-out / removal: never re-import this link; in Safari also remove it from the address bar
+    var su = setupFromHash(); if (!su) return;
+    try { localStorage.setItem('mtv_setup_skip', JSON.stringify(su.fp)); } catch (e) {}
+    if (!isStandalone()) { try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {} }
+  }
+  var setupAuto = null;
+  (function importSetup() {
+    var su = setupFromHash(); if (!su) return;
+    dropManifest();
+    if (lsGet('mtv_setup_skip', '') === su.fp) return;
+    var o = su.o, changed = false, pAdded = false, hadSources = sources.length > 0;
+    (o.s || []).forEach(function (x) {
+      if (!x || !x.type || x.type === 'file') return;
+      var have = null; for (var i = 0; i < sources.length; i++) if (sources[i].id === x.id || (x.type === 'xtream' && sources[i].server === x.server && sources[i].user === x.user)) have = sources[i];
+      if (!have) { sources.push(x); changed = true; } else if (x.pass && !have.pass) { have.pass = x.pass; changed = true; }
+    });
+    if (changed) { settings.remember = true; saveSettings(); saveSources(); }
+    // an untouched auto-created "Me" profile (app opened before login) is replaced by the link's profiles
+    if (!hadSources && profiles.length === 1 && profiles[0].name === 'Me' && !profiles[0].pin && !localStorage.getItem('mtv_pd_' + profiles[0].id) && (o.p || []).length) profiles = [];
+    (o.p || []).forEach(function (p) { if (!p || !p.id) return; for (var i = 0; i < profiles.length; i++) if (profiles[i].id === p.id) return; profiles.push(p); pAdded = true; });
+    if (pAdded) lsSet('mtv_profiles', profiles);
+    if (changed || pAdded) {
+      var ok = false; for (var j = 0; j < sources.length; j++) if (sources[j].id === activeId) ok = true;
+      if (!ok || !hadSources) { activeId = null; for (var k = 0; k < sources.length; k++) if (sources[k].id === o.a) activeId = o.a; if (!activeId && sources[0]) activeId = sources[0].id; lsSet('mtv_active', activeId); }
+      if (o.lp) lsSet('mtv_last_profile', o.lp);
+      setupAuto = o.lp || (o.p && o.p[0] && o.p[0].id) || null;
+    }
+  })();
   var adultUnlocked = false;
   function src() { for (var i = 0; i < sources.length; i++) if (sources[i].id === activeId) return sources[i]; return sources[0] || null; }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -309,6 +370,7 @@
       err.textContent = ''; resetData();
       show('login', false); window.scrollTo(0, 0);
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (isIOS() && !isStandalone() && s.type !== 'file') setTimeout(function () { openHomeLink(); }, 300);
       if (!profile) return showProfiles();
       show('main', true); setTab(settings.startTab);
     }).catch(function (x) { err.textContent = 'Could not connect: ' + x.message; });
@@ -1047,7 +1109,8 @@
     h += '<div class="card"><h3>Profile</h3>' + row('<span class="avatar" style="display:inline-flex;background:' + esc(profile.color) + '">' + esc(profile.emoji) + '</span> ' + esc(profile.name), profile.kids ? 'Kids profile' : '', '<button class="f btn ghost small" id="st-editp">Edit</button> <button class="f btn ghost small" id="st-switch">Switch profile</button>') +
       row('Continue watching', Object.keys(pdata.resume).length + ' saved', '<button class="f btn ghost small" id="st-clrcont">Clear</button>') +
       row('Recently watched', pdata.recent.length + ' channels', '<button class="f btn ghost small" id="st-clrrec">Clear</button>') + '</div>';
-    h += '<div class="card"><h3>Backup &amp; restore</h3>' + row('Back up profiles, favourites, Watch later and settings', 'Keep the code somewhere safe (Notes, email to yourself). Logins are left out unless you tick the box.', '<button class="f btn ghost small" id="st-export">Export</button> <button class="f btn ghost small" id="st-import">Import</button>') + '</div>';
+    h += '<div class="card"><h3>Backup &amp; restore</h3>' + row('Back up profiles, favourites, Watch later and settings', 'Keep the code somewhere safe (Notes, email to yourself). Logins are left out unless you tick the box.', '<button class="f btn ghost small" id="st-export">Export</button> <button class="f btn ghost small" id="st-import">Import</button>') +
+      row('Home Screen login link', 'iPhone/iPad: the Home Screen icon gets its own storage. This puts your login inside the icon\'s link so it always opens logged in.', '<button class="f btn small" id="st-homelink">Create link</button>') + '</div>';
     h += '<div class="card"><h3>Configure IPTV</h3><div id="st-sources"></div><div class="btnrow"><button class="f btn small" id="st-add">+ Add source (Xtream, M3U link or file)</button></div></div>';
     h += '<div class="card"><h3>General</h3>' +
       row('Start on', '', sel('st-start', [['home', 'Home'], ['live', 'Live TV'], ['vod', 'Movies'], ['series', 'Series'], ['search', 'Search']], settings.startTab)) +
@@ -1076,7 +1139,7 @@
       var r = el('button', 'f btn danger small', 'Remove'); r.onclick = function () {
         modal({ title: 'Remove "' + (x.name || x.type) + '"?', text: 'The login is forgotten on this device.', ok: 'Remove' }).then(function (ok) {
           if (!ok) return;
-          sources = sources.filter(function (y) { return y !== x; }); saveSources(); idbDel('file:' + x.id); idbDel('cat:' + x.id + ':m3u');
+          forgetHomeLink(); sources = sources.filter(function (y) { return y !== x; }); saveSources(); idbDel('file:' + x.id); idbDel('cat:' + x.id + ':m3u');
           if (activeId === x.id) { activeId = sources[0] ? sources[0].id : null; lsSet('mtv_active', activeId); resetData(); }
           if (!sources.length) openSourceForm(null); else renderSettings();
         });
@@ -1086,6 +1149,7 @@
     $('st-editp').onclick = function () { editProfile(profile); };
     $('st-switch').onclick = function () { managing = false; showProfiles(); };
     $('st-export').onclick = function () { openBackup('export'); };
+    $('st-homelink').onclick = function () { openHomeLink(); };
     $('st-import').onclick = function () { openBackup('import'); };
     $('st-clrcont').onclick = function () { modal({ title: 'Clear Continue watching?', text: 'Saved positions for ' + profile.name + ' are removed on this device.', ok: 'Clear' }).then(function (ok) { if (ok) { pdata.resume = {}; savePdata(); toast('Continue watching cleared'); } renderSettings(); }); };
     $('st-clrrec').onclick = function () { modal({ title: 'Clear Recently watched?', text: 'The recent channels list for ' + profile.name + ' is emptied.', ok: 'Clear' }).then(function (ok) { if (ok) { pdata.recent = []; savePdata(); toast('Recently watched cleared'); } renderSettings(); }); };
@@ -1110,7 +1174,7 @@
     $('st-signout').onclick = function () {
       modal({ title: 'Sign out?', text: 'All IPTV logins and uploaded playlists are removed from this device. Profiles and favourites stay.', ok: 'Sign out' }).then(function (ok) {
         if (!ok) return;
-        sources.forEach(function (x) { idbDel('file:' + x.id); });
+        sources.forEach(function (x) { idbDel('file:' + x.id); }); forgetHomeLink();
         sources = []; activeId = null; saveSources(); lsSet('mtv_active', null);
         lsDel('mtv_sources'); try { sessionStorage.removeItem('mtv_sources'); } catch (e) {}
         idbClearCatalogue(); resetData(); openSourceForm(null);
@@ -1157,6 +1221,18 @@
     setTimeout(function () { location.reload(); }, 600);
   };
   $('b-close').onclick = function () { show('backup', false); };
+  /* ---------- Home Screen login link sheet ---------- */
+  function openHomeLink() {
+    if (!sources.some(function (x) { return x.type !== 'file'; })) { toast('Add an IPTV login first'); return; }
+    var url = setHomeLink(), app = isStandalone();
+    $('h-steps').innerHTML = app
+      ? '<li>You are inside the Home Screen app, so a new icon has to be made from Safari.</li><li>Tap <b>Copy link</b>, open <b>Safari</b>, paste it in the address bar and open it.</li><li>Tap <b>Share</b> (square with the arrow), then <b>Add to Home Screen</b> → <b>Add</b>.</li><li>Open Maximus TV from the new icon. Delete the old icon afterwards.</li>'
+      : '<li>Tap <b>Share</b> (the square with the arrow) in Safari.</li><li>Scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.</li><li>Open Maximus TV from the new icon: you are logged in, with your profiles.</li><li>If you had an older Maximus TV icon, delete the old one and use only the new one.</li>';
+    $('h-url').value = url;
+    show('homelink', true); focusLater($('h-done'));
+  }
+  $('h-copy').onclick = function () { var ta = $('h-url'); ta.select(); try { (navigator.clipboard ? navigator.clipboard.writeText(ta.value) : Promise.reject()).then(function () { toast('Link copied'); }, function () { document.execCommand('copy'); toast('Link copied'); }); } catch (e) { document.execCommand('copy'); } };
+  $('h-done').onclick = function () { show('homelink', false); };
   function setPin() {
     var go = function () {
       modal({ title: 'New parental PIN', text: '4–8 digits', pin: true, minLen: 4 }).then(function (p) { if (p) { settings.parentalPin = p; saveSettings(); renderSettings(); } });
@@ -1165,7 +1241,7 @@
   }
 
   /* ---------- TV remote: spatial navigation + back ---------- */
-  try { if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'ColorF0Red', 'ColorF2Yellow', 'ColorF3Blue', 'Info'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} }); } catch (e) {}
+  try { if (window.tizen && tizen.tvinputdevice) ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'MediaRewind', 'MediaFastForward', 'ColorF0Red', 'ColorF1Green', 'ColorF2Yellow', 'ColorF3Blue', 'Info'].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} }); } catch (e) {}
   function topRoot() {
     var ov = document.querySelectorAll('.overlay:not(.hidden)'), best = null, bz = -1;
     each(ov, function (o) { var z = +getComputedStyle(o).zIndex || 0; if (z >= bz) { bz = z; best = o; } });
@@ -1194,6 +1270,7 @@
     if (isShown('profedit')) return show('profedit', false), true;
     if (isShown('cmenu')) return show('cmenu', false), true;
     if (isShown('backup')) return show('backup', false), true;
+    if (isShown('homelink')) return show('homelink', false), true;
     if (isShown('player')) return closePlayer(), true;
     if (isShown('fpanel')) return show('fpanel', false), true;
     if (isShown('detail')) return $('d-close').onclick(), true;
@@ -1209,8 +1286,10 @@
       if (k === 10009 && window.tizen) { try { tizen.application.getCurrentApplication().exit(); } catch (x) {} }
       return;
     }
-    if ((k === 405 || k === 406 || k === 403 || k === 457 || k === 93 || k === 70) && !typing && ae && (ae._mt || ae._ctx)) { cardAction(ae); e.preventDefault(); return; }
+    if ((k === 405 || k === 406 || k === 403 || k === 404 || k === 457 || k === 93 || k === 70) && !typing && ae && (ae._mt || ae._ctx)) { cardAction(ae); e.preventDefault(); return; }
     if (k === 10252 || k === 415 || k === 19) { if (video.paused) video.play(); else video.pause(); return; }
+    if (k === 413) { try { video.pause(); } catch (x) {} return; }
+    if ((k === 412 || k === 417) && isShown('player')) { try { video.currentTime += k === 417 ? 30 : -10; } catch (x) {} e.preventDefault(); return; }
     var dir = { 37: 'L', 38: 'U', 39: 'R', 40: 'D' }[k];
     if (!dir) return;
     if (typing && (dir === 'L' || dir === 'R')) return;
@@ -1228,6 +1307,7 @@
   if (activeId && !src()) activeId = null;
   if (!activeId && sources[0]) activeId = sources[0].id;
   showProfiles();
+  if (setupAuto && src()) { for (var spi = 0; spi < profiles.length; spi++) if (profiles[spi].id === setupAuto && !profiles[spi].pin) { pickProfile(profiles[spi]); break; } }
   /* ---------- durable storage: mirror + restore ---------- */
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {}); } catch (e) {}
   (function syncBackup() {
@@ -1261,7 +1341,7 @@
   function safeToReload() {
     var a = document.activeElement;
     if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return false;
-    return !(isShown('player') || isShown('login') || isShown('profedit') || isShown('modal') || isShown('profiles') && managing);
+    return !(isShown('player') || isShown('login') || isShown('profedit') || isShown('modal') || isShown('homelink') || isShown('profiles') && managing);
   }
   // Update = unregister service worker + clear Cache Storage (app files) ONLY. Never localStorage / IndexedDB / sessionStorage.
   function hardRefresh(v) {
@@ -1273,7 +1353,7 @@
     Promise.all(jobs).catch(function () {}).then(function () { location.reload(); });
   }
   function checkVersion() {
-    if (location.protocol !== 'https:') return;
+    if (location.protocol !== 'https:' || window.tizen) return;
     var x = new XMLHttpRequest();
     x.open('GET', 'version.json?t=' + Date.now(), true);
     try { x.setRequestHeader('Cache-Control', 'no-cache'); } catch (e) {}
@@ -1282,7 +1362,7 @@
   }
   checkVersion();
   document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.tizen) {
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (r) { try { r.update(); } catch (e) {} }).catch(function () {});
   }
 })();

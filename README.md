@@ -34,7 +34,7 @@ There is one branch, `main`. To release, edit `src/`, run `./build.sh`, then com
 Open the live URL in Safari → Share → **Add to Home Screen**. Then open it from the icon.
 
 ## Samsung TV (Tizen) install
-Retail Samsung TVs only install **signed** widgets, so you have to sign the package once with a free Samsung certificate:
+A step-by-step Mac guide is in [`SAMSUNG-INSTALL.md`](SAMSUNG-INSTALL.md). Retail Samsung TVs only install **signed** widgets, so you have to sign the package once with a free Samsung certificate:
 1. Install **Tizen Studio** with the TV extensions and **Certificate Manager** on a computer.
 2. On the TV, open **Apps** and press `1 2 3 4 5` on the remote. Turn **Developer mode** on, enter the computer's IP address, then restart the TV.
 3. In Certificate Manager, create a **Samsung** certificate profile (free Samsung account). Include the TV's DUID, which Device Manager shows once it is connected.
