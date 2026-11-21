@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.7';
+  var VERSION = '0.6.8';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -419,6 +419,44 @@
     r.all = all;
     return all;
   }
+  /* ---------- documentaries: one rule shared by Home, Live TV, Movies and Series ---------- */
+  var DOC_CAT = /documentar|dokument|belgesel|true ?crime|documentaire|documental|\bdocu/i;
+  var DOC_NAME = /documentar|dokument|\bdocu(?!ment)|documentaire|documental|belgesel/i;
+  var DOC_LIVE = /discovery|nat ?geo|national geographic|\bhistory|animal planet|\bdocu|dokument|documentar|belgesel|viasat (explore|nature|history)|smithsonian|bbc earth|love nature|curiosity|planete|plan\u00e8te|investigation|crime ?\+|\bdmax\b|wild ?earth|science channel|da vinci/i;
+  var docCatCache = {};
+  function docCats(t) {
+    var c = cats[t] || [], k = docCatCache[t];
+    if (k && k.src === c) return k.ids;
+    var ids = {}; c.forEach(function (x) { if (DOC_CAT.test(x.n)) ids[x.id] = 1; });
+    docCatCache[t] = { src: c, ids: ids }; return ids;
+  }
+  function isDoc(t, it) {
+    if (hasT(it, 'ty', 'Adult')) return false;
+    if (t === 'live') {
+      if (/kids|junior|^\W*[=#-]{2}/i.test(it.n)) return false;
+      return !!docCats(t)[it.c] || hasT(it, 'ty', 'Documentary') || DOC_LIVE.test(it.n);
+    }
+    if (t === 'series' && DOC_CAT.test(it.g || '')) return true;
+    return !!docCats(t)[it.c] || hasT(it, 'ty', 'Documentary') || DOC_NAME.test(it.n);
+  }
+  function docRow() {
+    var lists = { series: [], vod: [], live: [] };
+    ['series', 'vod', 'live'].forEach(function (t) {
+      var d = data[t] || [], out = lists[t];
+      for (var i = 0; i < d.length; i++) if (visible(t, d[i]) && isDoc(t, d[i])) out.push(d[i]);
+      if (t !== 'live') { out.sort(byRating); out.sort(function (a, b) { return (b.p ? 1 : 0) - (a.p ? 1 : 0); }); }
+    });
+    var mix = [], i = 0;
+    while (mix.length < 400 && (i < lists.series.length || i < lists.vod.length || i < lists.live.length)) {
+      if (lists.series[i]) mix.push({ type: 'series', it: lists.series[i] });
+      if (lists.vod[i]) mix.push({ type: 'vod', it: lists.vod[i] });
+      if (lists.live[i]) mix.push({ type: 'live', it: lists.live[i] });
+      i++;
+    }
+    if (mix.length < 4) return null;
+    var mk = function (x) { return card(x.type, x.it); };
+    return { title: 'Documentaries', list: mix, mk: mk, allFn: function () { openAll('Documentaries', mix, mk); } };
+  }
   function catRow(t, re, title, sort) {
     var c = (cats[t] || []).filter(function (x) { return re.test(x.n) && !adultCats[t][x.id]; });
     if (!c.length) return null;
@@ -552,6 +590,7 @@
       var rows = buildRows();
       var pc = popularChannels();
       if (pc.length) rows.splice(1, 0, { t: 'live', title: 'Popular channels', list: pc, noAll: true });
+      var dr = docRow(); if (dr) rows.splice(Math.min(rows.length, pc.length ? 3 : 2), 0, dr);
       // hero: best-rated recent premiere with a poster
       var hr = rows.filter(function (r) { return r.t === 'vod'; })[0];
       if (hr) {
@@ -621,6 +660,8 @@
     var list = [{ id: '*', n: 'All' }].concat(cats[t].filter(function (c) { return (!adultHidden() || !adultCats[t][c.id]) && (!filt || cnt[c.id]); }).slice().sort(function (a, b) { return azCmp(a.n, b.n); }));
     var cu = state.custom && state.custom.t === t ? state.custom : null;
     if (cu) list.splice(1, 0, { id: '~', n: '◆ ' + cu.title });
+    var nDoc = 0; data[t].forEach(function (it) { if (visible(t, it) && matchF(t, it) && isDoc(t, it)) nDoc++; });
+    if (nDoc) list.splice(cu ? 2 : 1, 0, { id: '◎', n: '◎ Documentaries' });
     var store = t === 'live' ? pdata.fav : pdata.later;
     if (pdata && Object.keys(store).some(function (k) { return store[k].type === t && store[k].src === src().id; })) list.splice(1, 0, { id: '★', n: t === 'live' ? '★ Favourite channels' : '✓ Watch later' });
     list.forEach(function (c) {
@@ -635,7 +676,7 @@
     state.cat = id;
     each($('cats').children, function (b) { b.classList.toggle('on', b.getAttribute('data-id') === id); });
     var cu = id === '~' ? state.custom : null;
-    state.items = data[t].filter(function (it) { return (id === '*' || (cu ? cu.pred(it) : id === '★' ? !!(t === 'live' ? pdata.fav : pdata.later)[ikey(t, it.id)] : it.c === id)) && visible(t, it) && matchF(t, it); });
+    state.items = data[t].filter(function (it) { return (id === '*' || (cu ? cu.pred(it) : id === '◎' ? isDoc(t, it) : id === '★' ? !!(t === 'live' ? pdata.fav : pdata.later)[ikey(t, it.id)] : it.c === id)) && visible(t, it) && matchF(t, it); });
     if (cu && cu.sort) state.items.sort(cu.sort);
     if (state.az) state.items.sort(function (a, b) { return azCmp(a.n, b.n); });
     if (t === 'live' && !state.az && id !== '★') { var fv = [], rest = []; state.items.forEach(function (it) { (pdata.fav[ikey('live', it.id)] ? fv : rest).push(it); }); state.items = fv.concat(rest); }
