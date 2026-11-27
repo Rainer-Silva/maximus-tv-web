@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.9';
+  var VERSION = '0.6.10';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -17,7 +17,8 @@
   var DURABLE = /^mtv_(profiles|settings|sources|active|last_profile|pd_.+|sort_az|seen_ver)$/;
   var bootHad = {}; try { for (var bi = 0; bi < localStorage.length; bi++) { var bk = localStorage.key(bi); if (DURABLE.test(bk)) bootHad[bk] = 1; } } catch (e) {}
   var backupReady = false, backupQueue = {};
-  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} if (DURABLE.test(k)) { if (backupReady) idbPut('bk:' + k, v); else backupQueue[k] = 1; } if (k === 'mtv_profiles' || k === 'mtv_sources') syncHomeHash(); }
+  function askPersist() { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {}); } catch (e) {} }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} if (DURABLE.test(k)) { if (backupReady) idbPut('bk:' + k, v); else backupQueue[k] = 1; askPersist(); } if (k === 'mtv_profiles' || k === 'mtv_sources') syncHomeHash(); }
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} if (DURABLE.test(k)) { delete backupQueue[k]; idbDel('bk:' + k); } } // explicit user actions only
   function ssGet(k, d) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function ssSet(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -129,6 +130,18 @@
       });
     });
   }
+  function idbGetRec(k) {
+    return db().then(function (d) {
+      if (!d) return null;
+      return new Promise(function (res) {
+        try {
+          var q = d.transaction('kv').objectStore('kv').get(k);
+          q.onsuccess = function () { res(q.result || null); };
+          q.onerror = function () { res(null); };
+        } catch (e) { res(null); }
+      });
+    });
+  }
   function idbPut(k, v) { return db().then(function (d) { if (d) try { d.transaction('kv', 'readwrite').objectStore('kv').put({ t: Date.now(), v: v }, k); } catch (e) {} }); }
   function idbDel(k) { return db().then(function (d) { if (d) try { d.transaction('kv', 'readwrite').objectStore('kv').delete(k); } catch (e) {} }); }
   function idbClearCatalogue() {
@@ -137,7 +150,13 @@
       return new Promise(function (res) {
         try {
           var st = d.transaction('kv', 'readwrite').objectStore('kv'), q = st.openCursor();
-          q.onsuccess = function () { var c = q.result; if (!c) return res(); if (String(c.key).indexOf('cat:') === 0) c.delete(); c.continue(); };
+          q.onsuccess = function () {
+            var c = q.result; if (!c) return res();
+            var k = String(c.key);
+            // Only catalogue / series-info caches. NEVER delete bk: login backups.
+            if (k.indexOf('cat:') === 0 || k.indexOf('sinfo:') === 0) c.delete();
+            c.continue();
+          };
           q.onerror = function () { res(); };
         } catch (e) { res(); }
       });
@@ -214,7 +233,8 @@
     var out = new Array(a.length);
     for (var i = 0; i < a.length; i++) {
       var s = a[i];
-      out[i] = { id: String(type === 'series' ? s.series_id : s.stream_id), n: s.name || '', c: String(s.category_id), p: s.stream_icon || s.cover || '', x: s.container_extension || '', r: s.rating || '', a: s.is_adult == 1 ? 1 : 0, g: type === 'series' ? (s.genre || '') : '', d: s.added || s.last_modified || '' };
+      var ym = String(s.releaseDate || s.release_date || s.year || '').match(/(19|20)\d{2}/);
+      out[i] = { id: String(type === 'series' ? s.series_id : s.stream_id), n: s.name || '', c: String(s.category_id), p: s.stream_icon || s.cover || '', x: s.container_extension || '', r: s.rating || '', a: s.is_adult == 1 ? 1 : 0, g: type === 'series' ? (s.genre || '') : '', d: s.added || s.last_modified || '', y: ym ? ym[0] : '' };
     }
     return out;
   }
@@ -825,13 +845,28 @@
       im.src = m[0]; box.appendChild(im);
     });
   }
+  function catName(type, id) {
+    var list = cats[type] || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === String(id)) return list[i].n;
+    return '';
+  }
   function card(type, it, sub) {
     var b = el('button', 'f item ' + type);
     var img = el('div', 'img');
     b.appendChild(img);
     setPic(img, type, it);
     b.appendChild(el('div', 't', esc(it.n)));
-    var meta = sub || (type === 'live' ? 'Live' : type === 'vod' ? 'Movie' : 'Series');
+    var meta = sub;
+    if (!meta) {
+      if (type === 'series') {
+        var bits = [];
+        if (it.y) bits.push(it.y);
+        var cn = catName('series', it.c);
+        if (cn) bits.push(cn);
+        else if (it.g) bits.push(String(it.g).split(/[,/]/)[0].trim());
+        meta = bits.length ? bits.join(' · ') : 'Series';
+      } else meta = type === 'live' ? 'Live' : 'Movie';
+    }
     if (!sub && it.r && it.r !== '0') meta += ' · ★ ' + esc(String(it.r).slice(0, 3));
     b.appendChild(el('div', 'm', esc(meta)));
     if (pdata) markCard(b, type, it);
@@ -941,6 +976,41 @@
 
   /* ---------- series ---------- */
   var curSeries = null;
+  function parseSeriesInfo(r) {
+    var eps = {}, e = (r && r.episodes) || {};
+    Object.keys(e).forEach(function (s) { eps[s] = e[s].map(function (x) { return { id: String(x.id), s: +s, e: +x.episode_num, t: x.title || '', x: x.container_extension }; }); });
+    return { plot: (r && r.info && r.info.plot) || '', eps: eps };
+  }
+  function renderSeriesDetail(it, r, keepSeason) {
+    if (curSeries !== it || !r) return;
+    var want = keepSeason || '';
+    if (!want) {
+      var on = $('d-seasons').querySelector('.chip.on');
+      if (on) want = (on.textContent || '').replace(/^Season\s+/, '');
+    }
+    $('d-plot').textContent = r.plot;
+    $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
+    var seasons = Object.keys(r.eps || {}).sort(function (a, b) { return a - b; });
+    if (!seasons.length) { $('d-plot').textContent += ' (No episodes found.)'; return; }
+    var pick = null;
+    seasons.forEach(function (s) {
+      var b = el('button', 'f chip', 'Season ' + esc(s));
+      b.onclick = function () {
+        each($('d-seasons').children, function (c) { c.classList.toggle('on', c === b); });
+        var box = $('d-eps'); box.innerHTML = '';
+        r.eps[s].forEach(function (ep) {
+          var rs = pdata.resume[ikey('ep', ep.id)];
+          var e = el('button', 'f ep', '<span>E' + esc(ep.e) + ' · ' + esc(ep.t) + '</span>' + (rs ? '<span class="note">▶ ' + fmtTime(rs.t) + '</span>' : ''));
+          e.onclick = function () { playEpisode(slimItem(it), ep); };
+          e.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+          box.appendChild(e);
+        });
+      };
+      $('d-seasons').appendChild(b);
+      if (String(s) === String(want)) pick = b;
+    });
+    (pick || $('d-seasons').firstChild).click();
+  }
   function openSeries(it) {
     curSeries = it;
     show('detail', true);
@@ -948,36 +1018,26 @@
     $('d-img').src = it.p || 'logo.svg'; $('d-seasons').innerHTML = ''; $('d-eps').innerHTML = '';
     $('d-fav').textContent = laterLabel(isLater('series', it)); curMovie = null; show('d-play', false); show('d-unres', false); show('d-seasons', true); show('d-eps', true);
     focusLater($('d-close'));
-    var p = src().type === 'xtream' ? api('get_series_info', '&series_id=' + it.id).then(function (r) {
-      var eps = {}, e = r.episodes || {};
-      Object.keys(e).forEach(function (s) { eps[s] = e[s].map(function (x) { return { id: String(x.id), s: +s, e: +x.episode_num, t: x.title || '', x: x.container_extension }; }); });
-      return { plot: (r.info && r.info.plot) || '', eps: eps };
-    }) : Promise.resolve().then(function () {
+    if (src().type !== 'xtream') {
       var eps = {}; (seriesEps[it.id] || []).forEach(function (x) { (eps[x.s] = eps[x.s] || []).push(x); });
       Object.keys(eps).forEach(function (s) { eps[s].sort(function (a, b) { return a.e - b.e; }); });
-      return { plot: '', eps: eps };
-    });
-    p.then(function (r) {
+      renderSeriesDetail(it, { plot: '', eps: eps });
+      return;
+    }
+    var key = 'sinfo:' + (src() ? src().id : '') + ':' + it.id;
+    idbGetRec(key).then(function (rec) {
       if (curSeries !== it) return;
-      $('d-plot').textContent = r.plot;
-      var seasons = Object.keys(r.eps).sort(function (a, b) { return a - b; });
-      if (!seasons.length) { $('d-plot').textContent += ' (No episodes found.)'; return; }
-      seasons.forEach(function (s, i) {
-        var b = el('button', 'f chip', 'Season ' + esc(s));
-        b.onclick = function () {
-          each($('d-seasons').children, function (c) { c.classList.toggle('on', c === b); });
-          var box = $('d-eps'); box.innerHTML = '';
-          r.eps[s].forEach(function (ep) {
-            var rs = pdata.resume[ikey('ep', ep.id)];
-            var e = el('button', 'f ep', '<span>E' + esc(ep.e) + ' · ' + esc(ep.t) + '</span>' + (rs ? '<span class="note">▶ ' + fmtTime(rs.t) + '</span>' : ''));
-            e.onclick = function () { playEpisode(slimItem(it), ep); };
-            box.appendChild(e);
-          });
-        };
-        $('d-seasons').appendChild(b);
-        if (i === 0) b.click();
+      var cached = rec && rec.v && rec.v.eps;
+      var fresh = cached && (Date.now() - rec.t < TTL);
+      if (cached) renderSeriesDetail(it, rec.v);
+      if (fresh) return;
+      if (!cached) $('d-plot').textContent = 'Loading…';
+      return api('get_series_info', '&series_id=' + it.id).then(function (raw) {
+        var info = parseSeriesInfo(raw);
+        idbPut(key, info);
+        renderSeriesDetail(it, info, cached ? undefined : '');
       });
-    }).catch(function (e) { $('d-plot').textContent = 'Could not load: ' + e.message; });
+    }).catch(function (e) { if (curSeries === it && !$('d-seasons').firstChild) $('d-plot').textContent = 'Could not load: ' + e.message; });
   }
   $('d-close').onclick = function () { show('detail', false); curSeries = null; curMovie = null; if (state.tab === 'home') renderHome(); };
   $('d-fav').onclick = function () {
@@ -1007,7 +1067,7 @@
   $('d-play').onclick = function () { if (curMovie) { var it = curMovie; show('detail', false); curMovie = null; play('vod', it); } };
 
   /* ---------- player ---------- */
-  var video = $('video'), hls = null, now = null, lastSave = 0;
+  var video = $('video'), hls = null, now = null, lastSave = 0, playTriedHls = false, pendingResume = 0;
   function stop() {
     if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
     try { video.pause(); } catch (e) {}
@@ -1017,8 +1077,24 @@
     var it = { id: ep.id, n: series.n + ' · S' + ep.s + 'E' + ep.e, p: series.p, x: ep.x, u: ep.u };
     play('series', it, { series: series, ep: ep });
   }
+  function attachHls(url, startAt) {
+    hls = new Hls({ enableWorker: true, maxBufferLength: +settings.buffer || 30, startPosition: startAt || -1 });
+    hls.loadSource(url); hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, function () { pickTracksHls(); video.play().catch(function () {}); });
+    hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) $('p-msg').textContent = 'Stream failed (' + d.details + '). If another device is watching, stop it first (1 connection on many plans).'; });
+  }
+  function startStream(url, startAt) {
+    var isHls = /\.m3u8(\?|$)/i.test(url), native = video.canPlayType('application/vnd.apple.mpegurl');
+    if (isHls && !native && window.Hls && Hls.isSupported()) attachHls(url, startAt);
+    else {
+      video.src = url;
+      if (startAt) video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); try { video.currentTime = startAt; } catch (e) {} });
+      video.play().catch(function () {});
+    }
+  }
   function play(type, it, extra) {
     stop();
+    playTriedHls = false;
     now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
     show('player', true);
     $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
@@ -1026,20 +1102,12 @@
     show('p-restart', false);
     if (type === 'live') { addRecent(it); loadEpg(it); }
     var url = streamUrl(type === 'series' ? 'series' : type, it);
-    var isHls = /\.m3u8(\?|$)/i.test(url), native = video.canPlayType('application/vnd.apple.mpegurl');
     var rs = type !== 'live' ? pdata.resume[now.key] : null;
     var startAt = rs && rs.t > 20 && rs.t < (rs.d || 1e9) * 0.95 ? rs.t : 0;
-    if (isHls && !native && window.Hls && Hls.isSupported()) {
-      hls = new Hls({ enableWorker: true, maxBufferLength: +settings.buffer || 30, startPosition: startAt || -1 });
-      hls.loadSource(url); hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, function () { pickTracksHls(); video.play().catch(function () {}); });
-      hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) $('p-msg').textContent = 'Stream failed (' + d.details + '). If another device is watching, stop it first (1 connection on many plans).'; });
-    } else {
-      video.src = url;
-      if (startAt) video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); try { video.currentTime = startAt; } catch (e) {} });
-      video.play().catch(function () {});
-    }
-    if (startAt) { show('p-restart', true); $('p-msg').textContent = 'Resumed from ' + fmtTime(startAt); }
+    pendingResume = startAt || 0;
+    if (type !== 'live') $('p-msg').textContent = 'Loading episode…';
+    if (startAt) show('p-restart', true);
+    startStream(url, startAt);
     focusLater($('p-close'));
   }
   function langMatch(code, s) { return code && LANG_NAMES[code] && new RegExp(LANG_NAMES[code], 'i').test(s || ''); }
@@ -1071,8 +1139,27 @@
     savePdata();
   }
   video.addEventListener('ended', function () { if (now && now.type !== 'live') { delete pdata.resume[now.key]; savePdata(); } });
+  function onMediaReady() {
+    if (!now || now.type === 'live') return;
+    if ($('p-msg').textContent === 'Loading episode…') $('p-msg').textContent = pendingResume ? 'Resumed from ' + fmtTime(pendingResume) : '';
+  }
+  video.addEventListener('playing', onMediaReady);
+  video.addEventListener('canplay', onMediaReady);
   video.addEventListener('error', function () {
-    var ext = (video.currentSrc || '').split('?')[0].split('.').pop();
+    if (now && now.type === 'series' && !playTriedHls) {
+      var cur = video.currentSrc || streamUrl('series', now.it) || '';
+      if (cur && !/\.m3u8(\?|$)/i.test(cur)) {
+        var next = cur.replace(/\.[a-z0-9]+(\?|$)/i, '.m3u8$1');
+        if (next !== cur) {
+          playTriedHls = true;
+          $('p-msg').textContent = 'Loading episode…';
+          if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+          startStream(next, pendingResume);
+          return;
+        }
+      }
+    }
+    var ext = (video.currentSrc || (now && now.it && streamUrl(now.type === 'series' ? 'series' : now.type, now.it)) || '').split('?')[0].split('.').pop();
     $('p-msg').textContent = 'Cannot play this ' + (/mkv|avi/i.test(ext) ? ext.toUpperCase() + ' file on this device' : /ts/i.test(ext) ? 'TS stream here — try format "HLS (m3u8)" in Settings' : 'stream') + '. If another device is watching, stop it first.';
   });
   function addRecent(it) {
@@ -1304,40 +1391,53 @@
 
   /* ---------- boot ---------- */
   applyTheme();
-  if (activeId && !src()) activeId = null;
-  if (!activeId && sources[0]) activeId = sources[0].id;
-  showProfiles();
-  if (setupAuto && src()) { for (var spi = 0; spi < profiles.length; spi++) if (profiles[spi].id === setupAuto && !profiles[spi].pin) { pickProfile(profiles[spi]); break; } }
+  askPersist();
+  var booted = false;
+  function finishBoot() {
+    if (booted) return;
+    booted = true;
+    if (activeId && !src()) activeId = null;
+    if (!activeId && sources[0]) activeId = sources[0].id;
+    showProfiles();
+    if (setupAuto && src()) { for (var spi = 0; spi < profiles.length; spi++) if (profiles[spi].id === setupAuto && !profiles[spi].pin) { pickProfile(profiles[spi]); break; } }
+    each(document.querySelectorAll('.ver'), function (e) { e.textContent = 'v' + VERSION; });
+    var seen = lsGet('mtv_seen_ver', null);
+    if (seen && seen !== VERSION) setTimeout(function () { toast('Updated to v' + VERSION); }, 800);
+    lsSet('mtv_seen_ver', VERSION);
+    checkVersion();
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
+    if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.tizen) {
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (r) { try { r.update(); } catch (e) {} }).catch(function () {});
+    }
+  }
   /* ---------- durable storage: mirror + restore ---------- */
-  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {}); } catch (e) {}
-  (function syncBackup() {
-    db().then(function (d) {
-      if (!d) return;
+  function syncBackup() {
+    return db().then(function (d) {
+      if (!d) { backupReady = true; return false; }
       var have = {};
       try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (DURABLE.test(k)) have[k] = 1; } } catch (e) {}
-      var st; try { st = d.transaction('kv', 'readonly').objectStore('kv'); } catch (e) { backupReady = true; return; }
-      var q = st.openCursor(), missing = [];
-      q.onsuccess = function () {
-        var c = q.result;
-        if (c) { var key = String(c.key); if (key.indexOf('bk:') === 0) { var lk = key.slice(3); if (!bootHad[lk] && c.value.v != null) missing.push([lk, c.value.v]); else if (bootHad[lk]) delete have[lk]; } c.continue(); return; }
-        // keys that were missing from localStorage when the app started but exist in the backup -> restore, reload once
-        if (missing.length && !ssGet('mtv_restored', false)) {
-          missing.forEach(function (m) { try { localStorage.setItem(m[0], JSON.stringify(m[1])); } catch (e) {} });
-          ssSet('mtv_restored', true); location.reload(); return;
-        }
-        backupReady = true;
-        // mirror everything that is in localStorage now (first run, or keys written during this boot)
-        Object.keys(have).concat(Object.keys(backupQueue)).forEach(function (k) { var v = lsGet(k, null); if (v != null) idbPut('bk:' + k, v); });
-        backupQueue = {};
-      };
-    });
-  })();
-
-  /* ---------- always run the latest deployed version ---------- */
-  each(document.querySelectorAll('.ver'), function (e) { e.textContent = 'v' + VERSION; });
-  var seen = lsGet('mtv_seen_ver', null);
-  if (seen && seen !== VERSION) setTimeout(function () { toast('Updated to v' + VERSION); }, 800);
-  lsSet('mtv_seen_ver', VERSION);
+      var st; try { st = d.transaction('kv', 'readonly').objectStore('kv'); } catch (e) { backupReady = true; return false; }
+      return new Promise(function (res) {
+        var q = st.openCursor(), missing = [];
+        q.onerror = function () { backupReady = true; res(false); };
+        q.onsuccess = function () {
+          var c = q.result;
+          if (c) { var key = String(c.key); if (key.indexOf('bk:') === 0) { var lk = key.slice(3); if (!bootHad[lk] && c.value && c.value.v != null) missing.push([lk, c.value.v]); else if (bootHad[lk]) delete have[lk]; } c.continue(); return; }
+          // keys missing from localStorage at startup but present in IndexedDB -> restore, reload once
+          if (missing.length && !ssGet('mtv_restored', false)) {
+            var wrote = false;
+            missing.forEach(function (m) { try { localStorage.setItem(m[0], JSON.stringify(m[1])); wrote = true; } catch (e) {} });
+            if (wrote) { ssSet('mtv_restored', true); location.reload(); res(true); return; }
+          }
+          backupReady = true;
+          // mirror everything that is in localStorage now (first run, or keys written during this boot)
+          Object.keys(have).concat(Object.keys(backupQueue)).forEach(function (k) { var v = lsGet(k, null); if (v != null) idbPut('bk:' + k, v); });
+          backupQueue = {};
+          res(false);
+        };
+      });
+    }).catch(function () { backupReady = true; return false; });
+  }
   function safeToReload() {
     var a = document.activeElement;
     if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return false;
@@ -1360,9 +1460,15 @@
     x.onload = function () { try { var v = JSON.parse(x.responseText).version; if (v && v !== VERSION && safeToReload()) hardRefresh(v); } catch (e) {} };
     x.send();
   }
-  checkVersion();
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
-  if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.tizen) {
-    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (r) { try { r.update(); } catch (e) {} }).catch(function () {});
+  // If localStorage already has a login, show the app immediately and mirror in the background.
+  // If it doesn't, wait briefly for the IndexedDB copy (iOS can clear localStorage) before showing the login screen.
+  if (sources.length) { syncBackup(); finishBoot(); }
+  else {
+    var bootTimer = setTimeout(function () { bootTimer = null; finishBoot(); }, 1500);
+    syncBackup().then(function (reloading) {
+      if (reloading) return;
+      if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
+      finishBoot();
+    });
   }
 })();
