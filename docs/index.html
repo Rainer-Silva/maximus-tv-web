@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
 <title>Maximus TV</title>
-<link rel="stylesheet" href="app.css?v=0.6.11">
+<link rel="stylesheet" href="app.css?v=0.6.12">
 </head>
 <body class="theme-dark">
 
@@ -156,12 +156,16 @@
 
 <!-- Player -->
 <div id="player" class="overlay hidden">
-  <video id="video" controls playsinline autoplay></video>
+  <video id="video" controls playsinline webkit-playsinline autoplay></video>
   <div class="pbar">
     <button class="f btn ghost" id="p-close">✕ Close</button>
     <button class="f btn ghost" id="p-fav">☆ Favourite</button>
     <button class="f btn ghost hidden" id="p-restart">↺ Start over</button>
     <div class="pinfo"><div id="p-title"></div><div id="p-epg" class="note"></div><div id="p-msg" class="err"></div></div>
+  </div>
+  <div id="p-openers" class="btnrow p-openers hidden">
+    <a class="f btn" id="p-vlc">Open in VLC</a>
+    <a class="f btn ghost" id="p-infuse">Open in Infuse</a>
   </div>
 </div>
 
@@ -176,9 +180,9 @@
   </div>
 </div>
 
-<script src="hls.min.js?v=0.6.11"></script>
-<script src="classify.js?v=0.6.11"></script>
-<script src="logokey.js?v=0.6.11"></script>
-<script src="app.js?v=0.6.11"></script>
+<script src="hls.min.js?v=0.6.12"></script>
+<script src="classify.js?v=0.6.12"></script>
+<script src="logokey.js?v=0.6.12"></script>
+<script src="app.js?v=0.6.12"></script>
 </body>
 </html>

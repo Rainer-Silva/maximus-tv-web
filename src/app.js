@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.11';
+  var VERSION = '0.6.12';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -1088,8 +1088,88 @@
   $('d-play').onclick = function () { if (curMovie) { var it = curMovie; show('detail', false); curMovie = null; play('vod', it); } };
 
   /* ---------- player ---------- */
-  var video = $('video'), hls = null, now = null, lastSave = 0, playTriedHls = false, pendingResume = 0;
+  var video = $('video'), hls = null, now = null, lastSave = 0, pendingResume = 0;
+  var playTimer = null, playUrls = [], playAttempt = 0, playOrigUrl = '', playGen = 0;
+  function isIosDevice() {
+    return /iP(hone|od|pad)/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+  function httpsUpgrade(url) {
+    if (!url || location.protocol !== 'https:' || !/^http:\/\//i.test(url)) return url;
+    return url.replace(/^http:\/\//i, 'https://').replace(/^(https:\/\/[^\/:]+):2095\b/i, '$1');
+  }
+  function isMixed(url) { return !!(url && location.protocol === 'https:' && /^http:\/\//i.test(url)); }
+  function swapExt(url, ext) { return (url || '').replace(/\.[a-z0-9]+(\?|$)/i, '.' + ext + '$1'); }
+  function urlExt(url) { var m = (url || '').split('?')[0].match(/\.([a-z0-9]+)$/i); return m ? m[1].toLowerCase() : ''; }
+  function iosUnplayable(ext) { return isIosDevice() && !window.tizen && /^(mkv|avi|mpg|mpeg|wmv|flv)$/i.test(ext || ''); }
+  function streamCandidates(type, it) {
+    var raw = streamUrl(type === 'series' ? 'series' : type, it);
+    var url = httpsUpgrade(raw);
+    var ext = (it.x || urlExt(url) || 'mp4').toLowerCase();
+    var list = [], seen = {};
+    function add(u) { if (u && !seen[u]) { seen[u] = 1; list.push(u); } }
+    if (iosUnplayable(ext)) {
+      add(swapExt(url, 'm3u8'));
+      add(swapExt(url, 'mp4'));
+      add(url);
+    } else {
+      add(url);
+      if (ext !== 'm3u8') add(swapExt(url, 'm3u8'));
+      if (ext !== 'mp4') add(swapExt(url, 'mp4'));
+    }
+    return list;
+  }
+  function playTimeoutMs() { return window.MTV_PLAY_TIMEOUT || 20000; }
+  function clearPlayTimer() { if (playTimer) { clearTimeout(playTimer); playTimer = null; } }
+  function armPlayTimer() {
+    clearPlayTimer();
+    if (!now || now.type === 'live') return;
+    playTimer = setTimeout(function () { onPlayFail('timeout'); }, playTimeoutMs());
+  }
+  function openerUrl() { return httpsUpgrade(playOrigUrl) || playUrls[0] || ''; }
+  function showOpeners(on) {
+    var box = $('p-openers');
+    if (!box) return;
+    if (on) {
+      var enc = encodeURIComponent(openerUrl());
+      $('p-vlc').href = 'vlc-x-callback://x-callback-url/stream?url=' + enc;
+      $('p-infuse').href = 'infuse://x-callback-url/play?url=' + enc;
+    } else {
+      $('p-vlc').removeAttribute('href');
+      $('p-infuse').removeAttribute('href');
+    }
+    show('p-openers', !!on);
+  }
+  function failMessage(reason) {
+    var ext = urlExt(playOrigUrl);
+    if (reason === 'mixed' || isMixed(playOrigUrl)) {
+      return 'iPhone Safari blocks this http:// stream on an https:// page. Open in VLC or Infuse, or change the server to https:// in Settings.';
+    }
+    if (/mkv|avi|mpg|mpeg/i.test(ext)) {
+      return 'Safari cannot play this ' + ext.toUpperCase() + ' file. Open it in VLC or Infuse (free on the App Store). If another device is watching, stop it first (1 connection).';
+    }
+    if (reason === 'timeout') {
+      return 'The episode did not start within 20 seconds. The stream may be too slow, or this device cannot play it. Try VLC or Infuse, and stop any other device first (1 connection).';
+    }
+    return 'Cannot play this stream. Try VLC or Infuse. If another device is watching, stop it first (1 connection).';
+  }
+  function onPlayFail(reason) {
+    if (!now || now.type === 'live') return;
+    var next = playAttempt + 1;
+    if (next < playUrls.length) {
+      playAttempt = next;
+      var nxt = playUrls[playAttempt], nExt = urlExt(nxt);
+      $('p-msg').textContent = nExt === 'm3u8' ? 'Safari cannot play this file here. Trying HLS…' : 'Trying another format (.' + nExt + ')…';
+      startStream(nxt, pendingResume);
+      return;
+    }
+    clearPlayTimer();
+    $('p-msg').textContent = failMessage(reason);
+    showOpeners(true);
+  }
   function stop() {
+    playGen += 1;
+    clearPlayTimer();
+    showOpeners(false);
     if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
     try { video.pause(); } catch (e) {}
     video.removeAttribute('src'); try { video.load(); } catch (e) {}
@@ -1098,41 +1178,64 @@
     var it = { id: ep.id, n: series.n + ' · S' + ep.s + 'E' + ep.e, p: series.p, x: ep.x, u: ep.u };
     play('series', it, { series: series, ep: ep });
   }
-  function attachHls(url, startAt) {
+  function attachHls(url, startAt, gen) {
     hls = new Hls({ enableWorker: true, maxBufferLength: +settings.buffer || 30, startPosition: startAt || -1 });
     hls.loadSource(url); hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, function () { pickTracksHls(); video.play().catch(function () {}); });
-    hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) $('p-msg').textContent = 'Stream failed (' + d.details + '). If another device is watching, stop it first (1 connection on many plans).'; });
+    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+      if (gen !== playGen) return;
+      pickTracksHls();
+      video.play().catch(function (err) {
+        if (gen !== playGen) return;
+        if (err && err.name === 'NotAllowedError') { $('p-msg').textContent = 'Tap the play button to start.'; return; }
+        onPlayFail('play');
+      });
+    });
+    hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal && gen === playGen) onPlayFail('hls'); });
   }
   function startStream(url, startAt) {
+    var gen = ++playGen;
+    if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+    if (isMixed(url)) { onPlayFail('mixed'); return; }
     var isHls = /\.m3u8(\?|$)/i.test(url), native = video.canPlayType('application/vnd.apple.mpegurl');
-    if (isHls && !native && window.Hls && Hls.isSupported()) attachHls(url, startAt);
+    armPlayTimer();
+    if (isHls && !native && window.Hls && Hls.isSupported()) attachHls(url, startAt, gen);
     else {
       video.src = url;
-      if (startAt) video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); try { video.currentTime = startAt; } catch (e) {} });
-      video.play().catch(function () {});
+      if (startAt) video.addEventListener('loadedmetadata', function once() { video.removeEventListener('loadedmetadata', once); if (gen === playGen) { try { video.currentTime = startAt; } catch (e) {} } });
+      video.play().catch(function (err) {
+        if (gen !== playGen) return;
+        if (err && err.name === 'NotAllowedError') { $('p-msg').textContent = 'Tap the play button to start.'; return; }
+        onPlayFail('play');
+      });
     }
   }
   function play(type, it, extra) {
     try {
       stop();
-      playTriedHls = false;
+      playAttempt = 0;
+      playOrigUrl = streamUrl(type === 'series' ? 'series' : type, it);
+      playUrls = streamCandidates(type, it);
       now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
       show('player', true);
       $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
       $('p-fav').textContent = type === 'live' ? (pdata.fav[ikey('live', it.id)] ? '★ Favourite ✕' : '☆ Favourite') : laterLabel(extra ? isLater('series', extra.series) : isLater(type, it));
       show('p-restart', false);
+      showOpeners(false);
       if (type === 'live') { addRecent(it); loadEpg(it); }
-      var url = streamUrl(type === 'series' ? 'series' : type, it);
       var rs = type !== 'live' ? pdata.resume[now.key] : null;
       var startAt = rs && rs.t > 20 && rs.t < (rs.d || 1e9) * 0.95 ? rs.t : 0;
       pendingResume = startAt || 0;
-      if (type !== 'live') $('p-msg').textContent = 'Loading episode…';
+      var firstExt = urlExt(playUrls[0] || '');
+      if (type !== 'live' && iosUnplayable(it.x) && firstExt && firstExt !== String(it.x || '').toLowerCase()) {
+        $('p-msg').textContent = 'Safari cannot play ' + String(it.x || '').toUpperCase() + '. Trying a compatible format…';
+      } else if (type !== 'live') {
+        $('p-msg').textContent = 'Loading episode…';
+      }
       if (startAt) show('p-restart', true);
-      startStream(url, startAt);
+      startStream(playUrls[0] || httpsUpgrade(playOrigUrl), startAt);
       focusLater($('p-close'));
     } catch (err) {
-      try { show('player', true); $('p-msg').textContent = 'Could not play: ' + (err && err.message ? err.message : 'error'); } catch (e2) {}
+      try { show('player', true); $('p-msg').textContent = 'Could not play: ' + (err && err.message ? err.message : 'error'); showOpeners(true); } catch (e2) {}
       toast('Could not play: ' + (err && err.message ? err.message : 'error'));
     }
   }
@@ -1167,26 +1270,19 @@
   video.addEventListener('ended', function () { if (now && now.type !== 'live') { delete pdata.resume[now.key]; savePdata(); } });
   function onMediaReady() {
     if (!now || now.type === 'live') return;
-    if ($('p-msg').textContent === 'Loading episode…') $('p-msg').textContent = pendingResume ? 'Resumed from ' + fmtTime(pendingResume) : '';
+    clearPlayTimer();
+    showOpeners(false);
+    var msg = $('p-msg').textContent || '';
+    if (/^Loading episode|Trying a compatible|Trying another format|Safari cannot play/.test(msg)) {
+      $('p-msg').textContent = pendingResume ? 'Resumed from ' + fmtTime(pendingResume) : '';
+    }
   }
   video.addEventListener('playing', onMediaReady);
   video.addEventListener('canplay', onMediaReady);
   video.addEventListener('error', function () {
-    if (now && now.type === 'series' && !playTriedHls) {
-      var cur = video.currentSrc || streamUrl('series', now.it) || '';
-      if (cur && !/\.m3u8(\?|$)/i.test(cur)) {
-        var next = cur.replace(/\.[a-z0-9]+(\?|$)/i, '.m3u8$1');
-        if (next !== cur) {
-          playTriedHls = true;
-          $('p-msg').textContent = 'Loading episode…';
-          if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
-          startStream(next, pendingResume);
-          return;
-        }
-      }
-    }
-    var ext = (video.currentSrc || (now && now.it && streamUrl(now.type === 'series' ? 'series' : now.type, now.it)) || '').split('?')[0].split('.').pop();
-    $('p-msg').textContent = 'Cannot play this ' + (/mkv|avi/i.test(ext) ? ext.toUpperCase() + ' file on this device' : /ts/i.test(ext) ? 'TS stream here — try format "HLS (m3u8)" in Settings' : 'stream') + '. If another device is watching, stop it first.';
+    if (!now || now.type === 'live') return;
+    if (!video.getAttribute('src') && !video.currentSrc) return;
+    onPlayFail('error');
   });
   function addRecent(it) {
     var sid = src().id;
