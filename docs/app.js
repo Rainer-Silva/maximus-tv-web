@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.10';
+  var VERSION = '0.6.11';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -976,6 +976,28 @@
 
   /* ---------- series ---------- */
   var curSeries = null;
+  function bindTap(el, fn) {
+    var last = 0, sx = 0, sy = 0;
+    function run(e) {
+      if (Date.now() - last < 400) return;
+      last = Date.now();
+      try { fn(e); } catch (err) { toast('Could not play: ' + (err && err.message ? err.message : 'error')); }
+    }
+    el.addEventListener('click', run);
+    el.addEventListener('touchstart', function (e) {
+      var t = e.changedTouches && e.changedTouches[0];
+      if (t) { sx = t.clientX; sy = t.clientY; }
+    }, { passive: true });
+    el.addEventListener('touchend', function (e) {
+      var t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      var dx = t.clientX - sx, dy = t.clientY - sy;
+      if (dx * dx + dy * dy > 100) return;
+      e.preventDefault();
+      run(e);
+    });
+    el.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+  }
   function parseSeriesInfo(r) {
     var eps = {}, e = (r && r.episodes) || {};
     Object.keys(e).forEach(function (s) { eps[s] = e[s].map(function (x) { return { id: String(x.id), s: +s, e: +x.episode_num, t: x.title || '', x: x.container_extension }; }); });
@@ -1001,8 +1023,7 @@
         r.eps[s].forEach(function (ep) {
           var rs = pdata.resume[ikey('ep', ep.id)];
           var e = el('button', 'f ep', '<span>E' + esc(ep.e) + ' · ' + esc(ep.t) + '</span>' + (rs ? '<span class="note">▶ ' + fmtTime(rs.t) + '</span>' : ''));
-          e.onclick = function () { playEpisode(slimItem(it), ep); };
-          e.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+          bindTap(e, function () { playEpisode(slimItem(it), ep); });
           box.appendChild(e);
         });
       };
@@ -1093,22 +1114,27 @@
     }
   }
   function play(type, it, extra) {
-    stop();
-    playTriedHls = false;
-    now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
-    show('player', true);
-    $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
-    $('p-fav').textContent = type === 'live' ? (pdata.fav[ikey('live', it.id)] ? '★ Favourite ✕' : '☆ Favourite') : laterLabel(extra ? isLater('series', extra.series) : isLater(type, it));
-    show('p-restart', false);
-    if (type === 'live') { addRecent(it); loadEpg(it); }
-    var url = streamUrl(type === 'series' ? 'series' : type, it);
-    var rs = type !== 'live' ? pdata.resume[now.key] : null;
-    var startAt = rs && rs.t > 20 && rs.t < (rs.d || 1e9) * 0.95 ? rs.t : 0;
-    pendingResume = startAt || 0;
-    if (type !== 'live') $('p-msg').textContent = 'Loading episode…';
-    if (startAt) show('p-restart', true);
-    startStream(url, startAt);
-    focusLater($('p-close'));
+    try {
+      stop();
+      playTriedHls = false;
+      now = { type: type, it: it, extra: extra, key: type === 'series' ? ikey('ep', it.id) : ikey(type, it.id) };
+      show('player', true);
+      $('p-title').textContent = it.n; $('p-msg').textContent = ''; $('p-epg').textContent = '';
+      $('p-fav').textContent = type === 'live' ? (pdata.fav[ikey('live', it.id)] ? '★ Favourite ✕' : '☆ Favourite') : laterLabel(extra ? isLater('series', extra.series) : isLater(type, it));
+      show('p-restart', false);
+      if (type === 'live') { addRecent(it); loadEpg(it); }
+      var url = streamUrl(type === 'series' ? 'series' : type, it);
+      var rs = type !== 'live' ? pdata.resume[now.key] : null;
+      var startAt = rs && rs.t > 20 && rs.t < (rs.d || 1e9) * 0.95 ? rs.t : 0;
+      pendingResume = startAt || 0;
+      if (type !== 'live') $('p-msg').textContent = 'Loading episode…';
+      if (startAt) show('p-restart', true);
+      startStream(url, startAt);
+      focusLater($('p-close'));
+    } catch (err) {
+      try { show('player', true); $('p-msg').textContent = 'Could not play: ' + (err && err.message ? err.message : 'error'); } catch (e2) {}
+      toast('Could not play: ' + (err && err.message ? err.message : 'error'));
+    }
   }
   function langMatch(code, s) { return code && LANG_NAMES[code] && new RegExp(LANG_NAMES[code], 'i').test(s || ''); }
   function pickTracksHls() {
