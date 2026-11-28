@@ -2,7 +2,7 @@
    Everything is stored locally on this device (localStorage + IndexedDB). No backend. */
 (function () {
   'use strict';
-  var VERSION = '0.6.12';
+  var VERSION = '0.6.13';
   var $ = function (id) { return document.getElementById(id); };
   var TTL = 12 * 3600 * 1000, PAGE = 120;
   var EMOJI = ['🙂', '😎', '🦁', '🐼', '🦊', '🐸', '🚀', '⚽', '🎮', '🎬', '🌟', '👑', '🐱', '🐶', '🌈', '🍿'];
@@ -1163,6 +1163,9 @@
       return;
     }
     clearPlayTimer();
+    if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+    try { video.pause(); } catch (e) {}
+    video.removeAttribute('src'); try { video.load(); } catch (e) {}
     $('p-msg').textContent = failMessage(reason);
     showOpeners(true);
   }
